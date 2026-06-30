@@ -1,11 +1,44 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from voice_assistant.app import RuntimeBundle, create_app
 from voice_assistant.constants import EventType, SoundEvent
+
+
+ADMIN_SECTION_PATTERN = re.compile(
+    r'<section class="admin-panel" data-admin-section="(?P<key>[^"]+)">\s*'
+    r'<h2>\s*<button (?P<button_attrs>[^>]*?)>\s*(?P<button_inner>.*?)</button>\s*</h2>\s*'
+    r'<div (?P<body_attrs>[^>]*?)>(?P<body>.*?)</div>\s*</section>',
+    re.S,
+)
+ATTR_PATTERN = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)(?:="([^"]*)")?')
+KNOWN_ADMIN_SECTION_TITLES = {"Status", "Configuration", "Sound Library", "Diagnostics", "Telemetry"}
+
+
+def _attrs(fragment: str) -> dict[str, str]:
+    return {name: value for name, value in ATTR_PATTERN.findall(fragment)}
+
+
+def _admin_panels(html: str) -> list[dict[str, object]]:
+    panels = []
+    for match in ADMIN_SECTION_PATTERN.finditer(html):
+        title_match = re.search(r'<span>(?P<title>.*?)</span>', match.group('button_inner'), re.S)
+        assert title_match is not None
+        panels.append(
+            {
+                "key": match.group('key'),
+                "title": title_match.group('title').strip(),
+                "button_attrs": _attrs(match.group('button_attrs')),
+                "button_inner": match.group('button_inner'),
+                "body_attrs": _attrs(match.group('body_attrs')),
+                "body": match.group('body'),
+            }
+        )
+    return panels
 
 
 def make_client(bundle_parts):
@@ -23,6 +56,72 @@ def test_admin_portal_and_status_need_no_auth(bundle_parts):
     response = client.get("/api/status")
     assert response.status_code == 200
     assert "state" in response.json()
+
+
+def test_admin_portal_top_level_sections_are_collapsed_by_default(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+    panels = _admin_panels(html)
+    titles = {str(panel["title"]) for panel in panels}
+
+    assert KNOWN_ADMIN_SECTION_TITLES <= titles
+    assert html.count('<section') == len(panels)
+    for panel in panels:
+        button_attrs = panel["button_attrs"]
+        body_attrs = panel["body_attrs"]
+        assert isinstance(button_attrs, dict)
+        assert isinstance(body_attrs, dict)
+        assert button_attrs["type"] == "button"
+        assert button_attrs["aria-expanded"] == "false"
+        assert button_attrs["onclick"] == "togglePanel(this)"
+        assert button_attrs["aria-controls"] == body_attrs["id"]
+        assert body_attrs["role"] == "region"
+        assert body_attrs["aria-labelledby"] == button_attrs["id"]
+        assert "hidden" in body_attrs
+
+
+def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    panels = {str(panel["title"]): str(panel["body"]) for panel in _admin_panels(client.get("/").text)}
+
+    expected_content = {
+        "Status": ['id="status"', 'id="health"', 'loadWakeDebug()'],
+        "Configuration": ['id="config"', 'applyDraft()', 'Edits are applied as a group'],
+        "Sound Library": ['id="soundFile"', 'loadSounds()', 'empty string'],
+        "Diagnostics": ['id="testText"', 'llmTtsTest()', 'commandTest()'],
+        "Telemetry": ['id="events"', 'loadEvents()', 'Search history'],
+    }
+    for title, tokens in expected_content.items():
+        assert title in panels
+        for token in tokens:
+            assert token in panels[title]
+
+
+def test_admin_portal_toggle_reveals_and_hides_without_replacing_form_state(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+
+    assert "function togglePanel(button)" in html
+    assert "const nextExpanded = button.getAttribute('aria-expanded') !== 'true';" in html
+    assert "button.setAttribute('aria-expanded', String(nextExpanded));" in html
+    assert "body.hidden = !nextExpanded;" in html
+    assert "state.textContent = nextExpanded ? 'Collapse -' : 'Expand +';" in html
+    assert ".innerHTML" not in html
+
+    config_panel = next(panel for panel in _admin_panels(html) if panel["title"] == "Configuration")
+    assert 'textarea id="config"' in str(config_panel["body"])
+    assert 'onclick="applyDraft()"' in str(config_panel["body"])
+
+
+def test_admin_portal_collapsible_controls_are_keyboard_accessible_buttons(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    for panel in _admin_panels(client.get("/").text):
+        button_attrs = panel["button_attrs"]
+        assert isinstance(button_attrs, dict)
+        assert button_attrs["type"] == "button"
+        assert "admin-panel-toggle" in button_attrs["class"].split()
+        assert button_attrs["aria-expanded"] in {"false", "true"}
+        assert "data-panel-state" in str(panel["button_inner"])
 
 
 def test_config_draft_apply_export_import_and_restart_pending(bundle_parts):

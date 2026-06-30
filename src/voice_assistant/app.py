@@ -87,7 +87,13 @@ INDEX_HTML = """
   <title>Local Voice Assistant Admin</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.45; }
-    section { border: 1px solid #ddd; padding: 1rem; margin: 1rem 0; border-radius: 0.5rem; }
+    section.admin-panel { border: 1px solid #ddd; padding: 0; margin: 1rem 0; border-radius: 0.5rem; overflow: hidden; }
+    section.admin-panel h2 { margin: 0; }
+    .admin-panel-toggle { align-items: center; background: #fff; border: 0; cursor: pointer; display: flex; font-size: 1.25rem; font-weight: 700; justify-content: space-between; margin: 0; padding: 1rem; text-align: left; width: 100%; }
+    .admin-panel-toggle:focus { outline: 2px solid #333; outline-offset: -2px; }
+    .admin-panel-toggle:hover { background: #f6f6f6; }
+    .admin-panel-state { font-size: 0.9rem; font-weight: 600; margin-left: 1rem; white-space: nowrap; }
+    .admin-panel-body { border-top: 1px solid #ddd; padding: 1rem; }
     textarea { width: 100%; min-height: 12rem; font-family: ui-monospace, monospace; }
     input, button, select { margin: 0.2rem; padding: 0.35rem; }
     pre { background: #f6f6f6; padding: 1rem; overflow: auto; }
@@ -97,47 +103,90 @@ INDEX_HTML = """
 <body>
   <h1>Local Voice Assistant Admin</h1>
   <p class="warn">V1 has no authentication by requirement. Keep this service on the trusted local network only.</p>
-  <section>
-    <h2>Status</h2>
-    <button onclick="loadStatus()">Refresh status</button>
-    <button onclick="simulateWake()">Simulate wake (admin-only)</button>
-    <button onclick="loadHealth()">Refresh health</button>
-    <button onclick="loadWakeDebug()">Wake debug</button>
-    <button onclick="migrateProductionWake()">Migrate saved config to production wake</button>
-    <pre id="status"></pre>
-    <pre id="health"></pre>
+  <section class="admin-panel" data-admin-section="status">
+    <h2>
+      <button id="toggle-status" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-status" onclick="togglePanel(this)">
+        <span>Status</span>
+        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
+      </button>
+    </h2>
+    <div id="panel-status" class="admin-panel-body" role="region" aria-labelledby="toggle-status" hidden>
+      <button onclick="loadStatus()">Refresh status</button>
+      <button onclick="simulateWake()">Simulate wake (admin-only)</button>
+      <button onclick="loadHealth()">Refresh health</button>
+      <button onclick="loadWakeDebug()">Wake debug</button>
+      <button onclick="migrateProductionWake()">Migrate saved config to production wake</button>
+      <pre id="status"></pre>
+      <pre id="health"></pre>
+    </div>
   </section>
-  <section>
-    <h2>Configuration</h2>
-    <button onclick="loadConfig()">Load config</button>
-    <button onclick="saveDraft()">Save draft</button>
-    <button onclick="applyDraft()">Apply saved draft</button>
-    <a href="/api/config/export" download="voice-assistant-config.json">Export saved config</a>
-    <p>Edits are applied as a group. STT/LLM/TTS connection changes are saved as pending-restart values.</p>
-    <textarea id="config"></textarea>
-    <pre id="configResult"></pre>
+  <section class="admin-panel" data-admin-section="configuration">
+    <h2>
+      <button id="toggle-configuration" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-configuration" onclick="togglePanel(this)">
+        <span>Configuration</span>
+        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
+      </button>
+    </h2>
+    <div id="panel-configuration" class="admin-panel-body" role="region" aria-labelledby="toggle-configuration" hidden>
+      <button onclick="loadConfig()">Load config</button>
+      <button onclick="saveDraft()">Save draft</button>
+      <button onclick="applyDraft()">Apply saved draft</button>
+      <a href="/api/config/export" download="voice-assistant-config.json">Export saved config</a>
+      <p>Edits are applied as a group. STT/LLM/TTS connection changes are saved as pending-restart values.</p>
+      <textarea id="config"></textarea>
+      <pre id="configResult"></pre>
+    </div>
   </section>
-  <section>
-    <h2>Sound library</h2>
-    <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio. Set a sound event file to an empty string to intentionally disable sound for that event.</p>
-    <input id="soundFile" type="file" /> <button onclick="uploadSound()">Upload</button>
-    <button onclick="loadSounds()">List sounds</button>
-    <pre id="sounds"></pre>
+  <section class="admin-panel" data-admin-section="sound-library">
+    <h2>
+      <button id="toggle-sound-library" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-sound-library" onclick="togglePanel(this)">
+        <span>Sound Library</span>
+        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
+      </button>
+    </h2>
+    <div id="panel-sound-library" class="admin-panel-body" role="region" aria-labelledby="toggle-sound-library" hidden>
+      <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio. Set a sound event file to an empty string to intentionally disable sound for that event.</p>
+      <input id="soundFile" type="file" /> <button onclick="uploadSound()">Upload</button>
+      <button onclick="loadSounds()">List sounds</button>
+      <pre id="sounds"></pre>
+    </div>
   </section>
-  <section>
-    <h2>Diagnostics</h2>
-    <input id="testText" value="Say this through the assistant path." size="60" />
-    <button onclick="llmTtsTest()">Typed LLM/TTS test through speakerphone</button>
-    <button onclick="micTest()">5s microphone test</button>
-    <input id="commandText" value="stop" /> <button onclick="commandTest()">Local command test</button>
-    <pre id="tests"></pre>
+  <section class="admin-panel" data-admin-section="diagnostics">
+    <h2>
+      <button id="toggle-diagnostics" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-diagnostics" onclick="togglePanel(this)">
+        <span>Diagnostics</span>
+        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
+      </button>
+    </h2>
+    <div id="panel-diagnostics" class="admin-panel-body" role="region" aria-labelledby="toggle-diagnostics" hidden>
+      <input id="testText" value="Say this through the assistant path." size="60" />
+      <button onclick="llmTtsTest()">Typed LLM/TTS test through speakerphone</button>
+      <button onclick="micTest()">5s microphone test</button>
+      <input id="commandText" value="stop" /> <button onclick="commandTest()">Local command test</button>
+      <pre id="tests"></pre>
+    </div>
   </section>
-  <section>
-    <h2>Telemetry</h2>
-    <input id="search" placeholder="search" /> <button onclick="loadEvents()">Search history</button>
-    <pre id="events"></pre>
+  <section class="admin-panel" data-admin-section="telemetry">
+    <h2>
+      <button id="toggle-telemetry" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-telemetry" onclick="togglePanel(this)">
+        <span>Telemetry</span>
+        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
+      </button>
+    </h2>
+    <div id="panel-telemetry" class="admin-panel-body" role="region" aria-labelledby="toggle-telemetry" hidden>
+      <input id="search" placeholder="search" /> <button onclick="loadEvents()">Search history</button>
+      <pre id="events"></pre>
+    </div>
   </section>
 <script>
+function togglePanel(button){
+  const body = document.getElementById(button.getAttribute('aria-controls'));
+  const nextExpanded = button.getAttribute('aria-expanded') !== 'true';
+  button.setAttribute('aria-expanded', String(nextExpanded));
+  if(body){ body.hidden = !nextExpanded; }
+  const state = button.querySelector('[data-panel-state]');
+  if(state){ state.textContent = nextExpanded ? 'Collapse -' : 'Expand +'; }
+}
 async function j(url, opts={}) { const r = await fetch(url, opts); const t = await r.text(); try { return JSON.parse(t); } catch { return t; } }
 async function loadStatus(){ document.getElementById('status').textContent = JSON.stringify(await j('/api/status'), null, 2); }
 async function loadHealth(){ document.getElementById('health').textContent = JSON.stringify(await j('/api/health'), null, 2); }
