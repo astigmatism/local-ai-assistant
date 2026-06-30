@@ -44,6 +44,9 @@ class ArtifactKind(StrEnum):
 
 class EventType(StrEnum):
     WAKE_DETECTED = "wake_detected"
+    WAKE_ACK_PLAYBACK_STARTED = "wake_ack_playback_started"
+    WAKE_ACK_PLAYBACK_ENDED = "wake_ack_playback_ended"
+    WAKE_ACK_PLAYBACK_FAILED = "wake_ack_playback_failed"
     BARGE_IN = "barge_in"
     PROMPT_CAPTURE_STARTED = "prompt_capture_started"
     PROMPT_CAPTURE_ENDED = "prompt_capture_ended"

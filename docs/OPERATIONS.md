@@ -76,13 +76,13 @@ The self-test should report `engine: pocketsphinx_continuous_arecord_overlap`, `
 Manual voice-only validation on the EMEET speakerphone:
 
 1. Say `Rosalina` without pressing keys, opening the portal, using SSH, or posting to `/api/test/wake`.
-2. Hear the wake acknowledgement.
-3. Ask a short question.
+2. Hear the full wake acknowledgement.
+3. Ask a short question after the acknowledgement finishes.
 4. Hear the response.
 5. Check telemetry for wake, prompt capture, local command gate, STT, LLM, TTS, and playback events.
 6. Reboot the thin client and repeat the same voice-only test.
 
-During prompt capture, the app pauses the wake subprocess to release the ALSA microphone. It resumes wake listening after capture, so saying the wake phrase during STT, LLM, TTS, or playback acts as barge-in.
+During wake acknowledgement and prompt capture, the app pauses the wake subprocess to avoid self-triggering on acknowledgement audio and to release the ALSA microphone for prompt capture. It resumes wake listening after capture, so saying the wake phrase during STT, LLM, TTS, or playback acts as barge-in.
 
 ## Service restart and reboot
 

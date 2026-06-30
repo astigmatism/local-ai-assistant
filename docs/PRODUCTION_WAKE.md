@@ -21,7 +21,7 @@ The packaged command now keeps one local continuous `arecord` raw PCM capture op
 
 Default timing is a 4.0 second decode window with a 1.0 second hop, so each decode has 3.0 seconds of overlap with the previous decode. This preserves the target hardware behavior where PocketSphinx receives EOF for each decoded window, while reducing wake-word misses at fixed window boundaries.
 
-The main assistant supervises that wrapper subprocess, parses the JSON event, plays the wake acknowledgement, captures the prompt, and then resumes wake listening for barge-in during STT/LLM/TTS/playback. The wrapper cleans up active `arecord` and `pocketsphinx_continuous` children when it receives SIGTERM/SIGINT.
+The main assistant supervises that wrapper subprocess, parses the JSON event, pauses wake listening, plays the wake acknowledgement to completion, captures the prompt, and then resumes wake listening for barge-in during STT/LLM/TTS/playback. The wrapper cleans up active `arecord` and `pocketsphinx_continuous` children when it receives SIGTERM/SIGINT.
 
 This approach was selected because it avoids the failed `openwakeword` optional dependency path under the current Python 3.12 image, keeps wake detection local, uses Debian packages installed at image build time, preserves the existing `external_command` abstraction for future wake engines, and improves reliability over non-overlapping finite chunks.
 
@@ -160,10 +160,10 @@ Expected signals:
 Voice-only hardware validation:
 
 1. Say `Rosalina` near the EMEET speakerphone.
-2. Hear the wake acknowledgement sound.
-3. Ask a simple question, for example: “What is two plus two?”
+2. Hear the full wake acknowledgement sound.
+3. Ask a simple question after the acknowledgement finishes, for example: “What is two plus two?”
 4. Hear the spoken answer through the EMEET speakerphone.
-5. Confirm telemetry contains this sequence: `wake_detected -> prompt_capture_started -> prompt_capture_ended -> command_recognition_started -> stt_started -> llm_started -> tts_started -> playback_started -> playback_ended`.
+5. Confirm telemetry contains this sequence: `wake_detected -> wake_ack_playback_started -> wake_ack_playback_ended -> prompt_capture_started -> prompt_capture_ended -> command_recognition_started -> stt_started -> llm_started -> tts_started -> playback_started -> playback_ended`.
 6. Reboot the thin client.
 7. Repeat the same voice-only test without opening the admin portal, pressing a key, running SSH commands, or posting to `/api/test/wake`.
 

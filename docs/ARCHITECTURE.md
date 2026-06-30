@@ -36,7 +36,7 @@ The state machine is deliberately conservative: local command recognition always
 
 ## Audio cue sequencing
 
-The audio controller serializes short local sound effects. The wake acknowledgement sound and prompt capture are scheduled together so the user can begin speaking as the sound starts. The runtime pauses wake listening while prompt capture owns ALSA and resumes it immediately after capture, allowing barge-in during STT, LLM, TTS, and playback without fighting the prompt recorder for the microphone. The thinking loop is stopped before prompt-accepted, failure, or TTS playback sounds to avoid confusing overlap. Barge-in cancellation calls `stop_all_playback()` and cancels the active task.
+The audio controller serializes short local sound effects. After a valid wake detection, the runtime awaits the configured wake acknowledgement sound before it transitions to prompt capture, so acknowledgement playback does not consume the user's prompt window or get recorded into the post-wake prompt. The runtime pauses wake listening while the acknowledgement plays and while prompt capture owns ALSA, then resumes it immediately after capture, allowing barge-in during STT, LLM, TTS, and playback without fighting the prompt recorder for the microphone. The thinking loop is stopped before prompt-accepted, failure, or TTS playback sounds to avoid confusing overlap. Barge-in cancellation calls `stop_all_playback()` and cancels the active task.
 
 ## Conversation context
 

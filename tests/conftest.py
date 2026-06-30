@@ -50,6 +50,10 @@ class FakeAudio:
         self.block_playback = False
         self.playback_started = asyncio.Event()
         self.allow_playback_finish = asyncio.Event()
+        self.block_wake_ack = False
+        self.fail_wake_ack = False
+        self.wake_ack_started = asyncio.Event()
+        self.allow_wake_ack_finish = asyncio.Event()
         self.stop_called = False
 
     def new_prompt_path(self, cfg, interaction_id=None):
@@ -72,8 +76,22 @@ class FakeAudio:
         write_wav(output_path)
         return CaptureResult(str(output_path), duration_seconds, "duration", 0.0, Path(output_path).stat().st_size)
 
-    async def play_sound_event(self, cfg, event, *, cancel_event=None, serialize=True):
-        self.calls.append(("play_sound_event", str(event)))
+    async def play_sound_event(self, cfg, event, *, cancel_event=None, serialize=True, require_playback=False):
+        event_name = str(event)
+        self.calls.append(("play_sound_event", event_name))
+        self.calls.append(("play_sound_event_start", event_name))
+        if event_name == str(SoundEvent.WAKE_ACK):
+            self.wake_ack_started.set()
+            if self.fail_wake_ack:
+                self.calls.append(("play_sound_event_failed", event_name))
+                raise RuntimeError("wake ack playback failed")
+            if self.block_wake_ack:
+                while not self.allow_wake_ack_finish.is_set():
+                    if cancel_event and cancel_event.is_set():
+                        self.calls.append(("play_sound_event_cancelled", event_name))
+                        raise asyncio.CancelledError
+                    await asyncio.sleep(0.01)
+        self.calls.append(("play_sound_event_end", event_name))
 
     def start_looping_sound(self, cfg, event):
         self.calls.append(("loop_requested", str(event)))

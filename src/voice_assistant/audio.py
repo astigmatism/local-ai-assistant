@@ -100,13 +100,19 @@ class AudioController:
         *,
         cancel_event: asyncio.Event | None = None,
         serialize: bool = True,
+        require_playback: bool = False,
     ) -> None:
         path = self.resolve_sound_path(cfg, event)
         if path is None:
             return
         if serialize:
             async with self._effect_lock:
-                await self.play_file(cfg, path, cancel_event=cancel_event)
+                if require_playback:
+                    await self.play_file(cfg, path, cancel_event=cancel_event, require_playback=True)
+                else:
+                    await self.play_file(cfg, path, cancel_event=cancel_event)
+        elif require_playback:
+            await self.play_file(cfg, path, cancel_event=cancel_event, require_playback=True)
         else:
             await self.play_file(cfg, path, cancel_event=cancel_event)
 
@@ -116,11 +122,16 @@ class AudioController:
         path: str | Path,
         *,
         cancel_event: asyncio.Event | None = None,
+        require_playback: bool = False,
     ) -> None:
         path = Path(path)
         if not path.exists():
+            if require_playback:
+                raise FileNotFoundError(path)
             return
         if shutil.which("aplay") is None:
+            if require_playback:
+                raise RuntimeError("aplay is required for audio playback")
             return
         await self.ensure_output_volume(cfg)
         proc = await asyncio.create_subprocess_exec(

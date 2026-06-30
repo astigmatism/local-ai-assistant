@@ -66,7 +66,8 @@ Normal voice flow:
 
 ```text
 local wake detection
-  -> wake acknowledgement sound and prompt capture start together
+  -> wake acknowledgement sound starts and is awaited to completion
+  -> prompt capture starts after acknowledgement playback finishes
   -> prompt capture ends by silence or max duration
   -> local command recognizer checks the whole captured utterance
   -> non-command audio goes to STT
@@ -81,7 +82,7 @@ Barge-in flow:
 ```text
 wake detected during STT, LLM, TTS, or playback
   -> active process/playback is cancelled
-  -> wake acknowledgement sound plays
+  -> wake acknowledgement sound plays to completion
   -> new prompt capture starts
 ```
 
@@ -152,7 +153,7 @@ Fresh production deployments default to the packaged local PocketSphinx external
 }
 ```
 
-The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us` at image build time, so no wake model is downloaded at runtime. The packaged wake subprocess keeps a continuous local `arecord` raw PCM capture open, snapshots a rolling in-memory buffer, and sends overlapping finite decode windows to `pocketsphinx_continuous -infile /dev/stdin`. Defaults are a 4.0 second decode window, 1.0 second hop, 3.0 seconds of overlap, and a 1.5 second detection cooldown. This keeps PocketSphinx's EOF-per-window behavior while reducing boundary misses from non-overlapping chunks. It intentionally avoids PocketSphinx's `-inmic yes -adcdev ...` live microphone mode because that backend failed on the target EMEET/ALSA deployment. The subprocess reads only local microphone audio and emits JSON wake detections to the app with `engine: pocketsphinx_continuous_arecord_overlap`. During prompt capture the app pauses the wake subprocess so ALSA capture is owned by the prompt recorder; after capture it resumes wake listening for barge-in during STT, LLM, TTS, and playback.
+The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us` at image build time, so no wake model is downloaded at runtime. The packaged wake subprocess keeps a continuous local `arecord` raw PCM capture open, snapshots a rolling in-memory buffer, and sends overlapping finite decode windows to `pocketsphinx_continuous -infile /dev/stdin`. Defaults are a 4.0 second decode window, 1.0 second hop, 3.0 seconds of overlap, and a 1.5 second detection cooldown. This keeps PocketSphinx's EOF-per-window behavior while reducing boundary misses from non-overlapping chunks. It intentionally avoids PocketSphinx's `-inmic yes -adcdev ...` live microphone mode because that backend failed on the target EMEET/ALSA deployment. The subprocess reads only local microphone audio and emits JSON wake detections to the app with `engine: pocketsphinx_continuous_arecord_overlap`. During wake acknowledgement and prompt capture the app pauses the wake subprocess so the local wake detector does not consume or react to acknowledgement audio and ALSA capture is owned by the prompt recorder. After capture it resumes wake listening for barge-in during STT, LLM, TTS, and playback.
 
 If `Rosalina` is not present in the selected PocketSphinx dictionary, the wrapper creates a deterministic merged runtime dictionary under `/tmp/voice-assistant-pocketsphinx/` with CMU-style pronunciations for `rosalina`; it does not edit the system dictionary in place.
 

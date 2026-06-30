@@ -161,3 +161,120 @@ async def test_local_command_recognizer_runs_only_after_wake_and_prompt_capture(
     prompt_end_index = [i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_end"][0]
     assert prompt_start_index < prompt_end_index
     assert stt.calls == []
+
+
+def _first_call_index(calls, expected):
+    return next(i for i, call in enumerate(calls) if call == expected)
+
+
+def _event_sequence(telemetry):
+    return [event.event_type for event in reversed(telemetry.query_events())]
+
+
+@pytest.mark.asyncio
+async def test_wake_ack_playback_is_invoked_before_prompt_capture_starts(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = ["stop"]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    ack_start_index = _first_call_index(audio.calls, ("play_sound_event_start", str(SoundEvent.WAKE_ACK)))
+    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_ACK)))
+    prompt_start_index = next(i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start")
+    assert ack_start_index < ack_end_index < prompt_start_index
+
+    events = _event_sequence(telemetry)
+    assert events.index(str(EventType.WAKE_DETECTED)) < events.index(str(EventType.WAKE_ACK_PLAYBACK_STARTED))
+    assert events.index(str(EventType.WAKE_ACK_PLAYBACK_STARTED)) < events.index(str(EventType.WAKE_ACK_PLAYBACK_ENDED))
+    assert events.index(str(EventType.WAKE_ACK_PLAYBACK_ENDED)) < events.index(str(EventType.PROMPT_CAPTURE_STARTED))
+
+
+@pytest.mark.asyncio
+async def test_prompt_capture_waits_for_wake_ack_awaitable_to_complete(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = ["stop"]
+    audio.block_wake_ack = True
+
+    await runtime.on_wake_detected(detection())
+    await asyncio.wait_for(audio.wake_ack_started.wait(), timeout=3)
+    await asyncio.sleep(0.03)
+
+    assert not any(call[0] == "record_prompt_start" for call in audio.calls)
+    assert runtime.state.state == RuntimeState.WAKE_DETECTED
+
+    audio.allow_wake_ack_finish.set()
+    await runtime.wait_until_idle()
+
+    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_ACK)))
+    prompt_start_index = next(i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start")
+    assert ack_end_index < prompt_start_index
+
+
+@pytest.mark.asyncio
+async def test_wake_ack_playback_failure_is_logged_and_prompt_capture_still_starts(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = ["stop"]
+    audio.fail_wake_ack = True
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    failure_events = telemetry.query_events(event_type=str(EventType.WAKE_ACK_PLAYBACK_FAILED))
+    assert len(failure_events) == 1
+    assert failure_events[0].success is False
+    assert "wake ack playback failed" in failure_events[0].error
+    failure_index = _first_call_index(audio.calls, ("play_sound_event_failed", str(SoundEvent.WAKE_ACK)))
+    prompt_start_index = next(i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start")
+    assert failure_index < prompt_start_index
+
+
+@pytest.mark.asyncio
+async def test_long_wake_ack_does_not_consume_prompt_capture_timer_window(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    cfg = store.get_saved().public_dict()
+    cfg["prompt_capture"]["minimum_duration_seconds"] = 4.0
+    cfg["prompt_capture"]["maximum_duration_seconds"] = 9.0
+    cfg["prompt_capture"]["silence_duration_seconds"] = 1.25
+    store.apply_config(cfg)
+    audio.command_texts = ["stop"]
+    audio.block_wake_ack = True
+
+    await runtime.on_wake_detected(detection())
+    await asyncio.wait_for(audio.wake_ack_started.wait(), timeout=3)
+    await asyncio.sleep(0.05)
+
+    assert telemetry.query_events(event_type=str(EventType.PROMPT_CAPTURE_STARTED)) == []
+
+    audio.allow_wake_ack_finish.set()
+    await runtime.wait_until_idle()
+
+    events = _event_sequence(telemetry)
+    assert events.index(str(EventType.WAKE_ACK_PLAYBACK_ENDED)) < events.index(str(EventType.PROMPT_CAPTURE_STARTED))
+    prompt_started = telemetry.query_events(event_type=str(EventType.PROMPT_CAPTURE_STARTED))[0]
+    assert prompt_started.data["minimum_duration_seconds"] == 4.0
+    assert prompt_started.data["maximum_duration_seconds"] == 9.0
+    assert prompt_started.data["silence_duration_seconds"] == 1.25
+
+
+@pytest.mark.asyncio
+async def test_admin_simulated_wake_uses_acknowledgement_before_capture(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = ["stop"]
+    audio.block_wake_ack = True
+
+    detection_result = await runtime.simulate_wake(confidence=0.42)
+    assert detection_result.engine == "admin_simulated"
+    await asyncio.wait_for(audio.wake_ack_started.wait(), timeout=3)
+    await asyncio.sleep(0.03)
+
+    assert not any(call[0] == "record_prompt_start" for call in audio.calls)
+
+    audio.allow_wake_ack_finish.set()
+    await runtime.wait_until_idle()
+
+    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_ACK)))
+    prompt_start_index = next(i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start")
+    assert ack_end_index < prompt_start_index
+    wake_events = telemetry.query_events(event_type=str(EventType.WAKE_DETECTED))
+    assert any(event.data.get("engine") == "admin_simulated" for event in wake_events)

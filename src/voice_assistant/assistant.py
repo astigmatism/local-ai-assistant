@@ -205,6 +205,7 @@ class AssistantRuntime:
         self._refresh_conversation_config(cfg)
         self._active_cancel_event = asyncio.Event()
         conversation_id = self.conversation.conversation_id
+        wake_detector_paused = False
         try:
             self.conversation.expire_if_needed()
             conversation_id = self.conversation.conversation_id
@@ -222,22 +223,27 @@ class AssistantRuntime:
                         "engine": detection.engine if detection else cfg.wake.engine,
                     },
                 )
-                # Start the acknowledgement sound and prompt recording in the same scheduling turn.
-                wake_sound_task = asyncio.create_task(
-                    self.audio.play_sound_event(cfg, SoundEvent.WAKE_ACK, cancel_event=self._active_cancel_event)
-                )
-            else:
-                wake_sound_task = None
+                await self.wake_engine.pause("wake_ack")
+                wake_detector_paused = True
+                await self._play_wake_acknowledgement(cfg, interaction_id, conversation_id)
 
             await self._capture_gate_and_process(
                 cfg,
                 interaction_id,
                 conversation_id,
-                wake_sound_task=wake_sound_task,
+                wake_detector_already_paused=wake_detector_paused,
             )
+            wake_detector_paused = False
         except asyncio.CancelledError:
+            if wake_detector_paused:
+                with contextlib.suppress(Exception):
+                    await self.wake_engine.resume()
             raise
         except Exception as exc:
+            if wake_detector_paused:
+                with contextlib.suppress(Exception):
+                    await self.wake_engine.resume()
+                wake_detector_paused = False
             await self._handle_failure(
                 cfg,
                 interaction_id=interaction_id,
@@ -255,6 +261,59 @@ class AssistantRuntime:
             if self.state.state != RuntimeState.IDLE:
                 self.state.set_state(RuntimeState.IDLE, interaction_id=interaction_id, conversation_id=conversation_id)
 
+    async def _play_wake_acknowledgement(
+        self,
+        cfg: AssistantConfig,
+        interaction_id: str,
+        conversation_id: str,
+    ) -> None:
+        started = time.monotonic()
+        self.telemetry.log_event(
+            EventType.WAKE_ACK_PLAYBACK_STARTED,
+            "Wake acknowledgement playback started.",
+            state=RuntimeState.WAKE_DETECTED.value,
+            conversation_id=conversation_id,
+            interaction_id=interaction_id,
+            component="audio",
+            data={"sound_event": SoundEvent.WAKE_ACK.value},
+        )
+        try:
+            await self.audio.play_sound_event(
+                cfg,
+                SoundEvent.WAKE_ACK,
+                cancel_event=self._active_cancel_event,
+                require_playback=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            duration_ms = (time.monotonic() - started) * 1000
+            self.telemetry.log_event(
+                EventType.WAKE_ACK_PLAYBACK_FAILED,
+                "Wake acknowledgement playback failed; continuing to prompt capture.",
+                state=RuntimeState.WAKE_DETECTED.value,
+                conversation_id=conversation_id,
+                interaction_id=interaction_id,
+                component="audio",
+                success=False,
+                error=str(exc),
+                duration_ms=duration_ms,
+                data={"sound_event": SoundEvent.WAKE_ACK.value},
+            )
+            return
+        duration_ms = (time.monotonic() - started) * 1000
+        self.telemetry.log_event(
+            EventType.WAKE_ACK_PLAYBACK_ENDED,
+            "Wake acknowledgement playback ended.",
+            state=RuntimeState.WAKE_DETECTED.value,
+            conversation_id=conversation_id,
+            interaction_id=interaction_id,
+            component="audio",
+            success=True,
+            duration_ms=duration_ms,
+            data={"sound_event": SoundEvent.WAKE_ACK.value},
+        )
+
     def _refresh_conversation_config(self, cfg: AssistantConfig) -> None:
         self.conversation.inactivity_timeout_seconds = cfg.conversation.inactivity_timeout_seconds
         # Do not replace existing history when only the prompt text changes; a new conversation reset
@@ -267,7 +326,7 @@ class AssistantRuntime:
         interaction_id: str,
         conversation_id: str,
         *,
-        wake_sound_task: asyncio.Task[None] | None,
+        wake_detector_already_paused: bool = False,
     ) -> None:
         cancel_event = self._active_cancel_event or asyncio.Event()
         prompt_path = self.audio.new_prompt_path(cfg, interaction_id)
@@ -285,16 +344,13 @@ class AssistantRuntime:
                 "silence_rms_threshold": cfg.prompt_capture.silence_rms_threshold,
             },
         )
-        await self.wake_engine.pause("prompt_capture")
+        if not wake_detector_already_paused:
+            await self.wake_engine.pause("prompt_capture")
         try:
             capture_task = asyncio.create_task(self.audio.record_prompt(cfg, prompt_path, cancel_event=cancel_event))
             capture = await capture_task
         finally:
             await self.wake_engine.resume()
-        if wake_sound_task:
-            # Do not let a still-playing acknowledgement overlap command/failure/processing cues.
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await wake_sound_task
         self.telemetry.log_event(
             EventType.PROMPT_CAPTURE_ENDED,
             "Prompt capture ended.",
@@ -412,7 +468,7 @@ class AssistantRuntime:
                 new_cfg,
                 new_interaction_id,
                 new_conversation_id,
-                wake_sound_task=None,
+                wake_detector_already_paused=False,
             )
             return
         raise RuntimeError(f"Unsupported command intent in v1 registry: {command.intent}")
