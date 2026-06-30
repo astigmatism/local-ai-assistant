@@ -93,6 +93,7 @@ class HealthChecker:
                         "VOICE_ASSISTANT_WAKE_SENSITIVITY": str(self.cfg.wake.sensitivity),
                         "VOICE_ASSISTANT_CAPTURE_DEVICE": self.cfg.audio.capture_device,
                         "VOICE_ASSISTANT_SAMPLE_RATE_HZ": str(self.cfg.audio.sample_rate_hz),
+                        "VOICE_ASSISTANT_CHANNELS": str(self.cfg.audio.channels),
                     }
                 )
                 if self.cfg.wake.model_path:

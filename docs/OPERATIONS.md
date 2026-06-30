@@ -71,7 +71,7 @@ docker compose exec voice-assistant python -m voice_assistant.pocketsphinx_wake 
 curl -sS http://<assistant-ip>:8080/api/wake/debug
 ```
 
-The self-test should report `capture_backend: arecord_pipe`. `/api/status` should show `wake.process_running: true`; if the subprocess cannot keep running, inspect `wake.last_error` and `wake.stderr_tail` for the most recent `arecord` or PocketSphinx wrapper error.
+The self-test should report `engine: pocketsphinx_continuous_arecord_chunk`, `capture_backend: arecord_chunk`, `chunk_seconds: 4.0`, and `cooldown_seconds: 1.5`. `/api/status` should show `wake.process_running: true`; if the subprocess cannot keep running, inspect `wake.last_error` and `wake.stderr_tail` for the most recent `arecord` or PocketSphinx wrapper error.
 
 Manual voice-only validation on the EMEET speakerphone:
 

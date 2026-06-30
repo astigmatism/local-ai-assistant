@@ -73,10 +73,10 @@ The package includes three engines:
 - `openwakeword`: feeds ALSA microphone chunks into openWakeWord.
 - `external_command`: runs a local dedicated wake process and treats stdout detections as wake events.
 
-The production default is `external_command` with `python -m voice_assistant.pocketsphinx_wake`. The wrapper captures microphone audio with `arecord` and pipes raw 16 kHz mono PCM into `pocketsphinx_continuous -infile /dev/stdin`; it does not use PocketSphinx's `-inmic yes` live microphone backend. It emits JSON detections such as:
+The production default is `external_command` with `python -m voice_assistant.pocketsphinx_wake`. The wrapper captures rolling finite audio windows with `arecord -d 4`, pipes each raw 16 kHz mono PCM window into `pocketsphinx_continuous -infile /dev/stdin`, parses the finite decoder output after EOF, and starts the next window. It does not use PocketSphinx's `-inmic yes` live microphone backend or one endless decoder stdin pipe. It emits JSON detections such as:
 
 ```json
-{"event":"wake","engine":"pocketsphinx_continuous_arecord_pipe","phrase":"computer","confidence":null}
+{"event":"wake","engine":"pocketsphinx_continuous_arecord_chunk","capture_backend":"arecord_chunk","phrase":"computer","confidence":null}
 ```
 
 The external adapter supervises the process, restarts it if it exits unexpectedly, terminates it cleanly on shutdown, and exposes process/detection status plus recent stderr diagnostics through `/api/status` and `/api/wake/debug`.

@@ -2,19 +2,29 @@
 
 ## Selected approach
 
-This package now uses the existing `external_command` wake adapter as the production path, with a source-controlled command module:
+This package uses the existing `external_command` wake adapter as the production path, with a source-controlled command module:
 
 ```text
 python -m voice_assistant.pocketsphinx_wake
 ```
 
-The command wraps the local `pocketsphinx_continuous` keyword spotter, but it does **not** use PocketSphinx's `-inmic yes` live microphone backend. The target thin client proved that `arecord -D plughw:0,0` can open the EMEET microphone while `pocketsphinx_continuous -inmic yes -adcdev plughw:0,0` exits with `Connection refused`. The packaged command therefore runs `arecord` as the capture process and pipes raw 16 kHz mono PCM into PocketSphinx with `-infile /dev/stdin`. It emits one JSON line on stdout for each accepted wake detection. The main assistant supervises that subprocess, parses the JSON event, plays the wake acknowledgement, captures the prompt, and then resumes wake listening for barge-in during STT/LLM/TTS/playback.
+The command wraps the local `pocketsphinx_continuous` keyword spotter, but it does **not** use PocketSphinx's `-inmic yes` live microphone backend. The target thin client proved that `arecord -D plughw:0,0` can open the EMEET microphone while `pocketsphinx_continuous -inmic yes -adcdev plughw:0,0` exits with `Connection refused`.
 
-This approach was selected because it avoids the failed `openwakeword` optional dependency path under the current Python 3.12 image, keeps wake detection local, uses Debian packages installed at image build time, preserves the existing `external_command` abstraction for future wake engines, and matches the manual hardware test that successfully detected `computer` through an `arecord | pocketsphinx_continuous -infile /dev/stdin` pipeline.
+The packaged command also does **not** keep one endless `arecord | pocketsphinx_continuous -infile /dev/stdin` pipeline open. The target hardware test detected `computer` only when PocketSphinx received EOF for each short audio window. The production wrapper therefore runs a rolling finite-window loop:
+
+1. Capture a short raw PCM window with `arecord -d 4`.
+2. Pipe that finite window to `pocketsphinx_continuous -infile /dev/stdin`.
+3. Parse the decoder stdout after EOF.
+4. Emit one JSON wake event when the configured phrase is detected.
+5. Apply a short cooldown and continue looping.
+
+The main assistant supervises that wrapper subprocess, parses the JSON event, plays the wake acknowledgement, captures the prompt, and then resumes wake listening for barge-in during STT/LLM/TTS/playback. The wrapper cleans up any active `arecord` or `pocketsphinx_continuous` child when it receives SIGTERM/SIGINT.
+
+This approach was selected because it avoids the failed `openwakeword` optional dependency path under the current Python 3.12 image, keeps wake detection local, uses Debian packages installed at image build time, preserves the existing `external_command` abstraction for future wake engines, and matches the manual finite-window hardware test that successfully detected `computer`.
 
 ## Changed behavior
 
-Fresh deployments now default to:
+Fresh deployments default to:
 
 ```json
 {
@@ -27,6 +37,18 @@ Fresh deployments now default to:
     "sensitivity": 0.5
   }
 }
+```
+
+The packaged wrapper defaults are tuned for the target EMEET deployment:
+
+```text
+capture device: plughw:0,0
+phrase: computer
+sample rate: 16000 Hz
+channels: 1
+chunk duration: 4 seconds
+threshold: 1e-20 when wake.sensitivity is 0.5
+cooldown after detection: 1.5 seconds
 ```
 
 The `simulated` engine and `POST /api/test/wake` remain available, but they are labeled as admin/test diagnostics and are no longer represented as the production input method.
@@ -45,7 +67,7 @@ docker compose build
 docker compose up -d
 ```
 
-The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us`. `alsa-utils` supplies the always-on capture command used by the wake wrapper. Docker Compose keeps the existing deployment shape: host networking, `/dev/snd` passthrough, the `audio` group, `./data` persistence, and restart policy `unless-stopped`.
+The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us`. `alsa-utils` supplies the finite-window capture command used by the wake wrapper. Docker Compose keeps the existing deployment shape: host networking, `/dev/snd` passthrough, the `audio` group, `./data` persistence, and restart policy `unless-stopped`.
 
 The expected target values remain:
 
@@ -100,6 +122,7 @@ Expected signals:
 
 - `/api/status` shows `wake_engine: external_command` and `wake.mode: production_local_subprocess`.
 - `/api/status` shows the configured command `python -m voice_assistant.pocketsphinx_wake`.
+- `/api/status` shows `wake.packaged_backend: pocketsphinx_continuous_arecord_chunk`.
 - `/api/status` shows `wake.process_running: true` after startup and after the migration reload completes.
 - `/api/health` includes passing `wake-word engine` and `wake-word runtime` checks.
 - `/api/wake/debug` shows recent real wake detections after voice tests and separately labels `/api/test/wake` as simulated/admin-only.
@@ -130,7 +153,23 @@ Pre-wake audio is consumed only by the local PocketSphinx wake subprocess. It is
 
 ## Tuning
 
-The app-level `wake.sensitivity` remains a 0.0 to 1.0 value. The wrapper maps it to PocketSphinx's keyword threshold. Higher values are more permissive. If needed, operators can tune the saved config through `/api/config` and verify with `/api/health` plus voice-only tests.
+The app-level `wake.sensitivity` remains a 0.0 to 1.0 value. The wrapper maps it to PocketSphinx's keyword threshold. Higher values are more permissive. At the default sensitivity of `0.5`, the threshold is `1e-20`, matching the successful target finite-window test.
+
+The wrapper can also be tuned with CLI flags or environment variables without changing Python source:
+
+```text
+--phrase / VOICE_ASSISTANT_WAKE_PHRASE
+--device / VOICE_ASSISTANT_CAPTURE_DEVICE
+--sample-rate / VOICE_ASSISTANT_SAMPLE_RATE_HZ
+--channels / VOICE_ASSISTANT_CHANNELS
+--chunk-seconds / VOICE_ASSISTANT_WAKE_CHUNK_SECONDS
+--cooldown-seconds / VOICE_ASSISTANT_WAKE_COOLDOWN_SECONDS
+--threshold / VOICE_ASSISTANT_POCKETSPHINX_THRESHOLD
+--hmm / VOICE_ASSISTANT_WAKE_MODEL_PATH
+--dict / VOICE_ASSISTANT_POCKETSPHINX_DICT
+```
+
+For the packaged production command, the app sets phrase, sensitivity, device, sample rate, and channel count from active config through environment variables when it starts the external wake process.
 
 For advanced troubleshooting, run the wrapper self-test inside the container:
 
@@ -141,13 +180,18 @@ docker compose exec voice-assistant python -m voice_assistant.pocketsphinx_wake 
 The self-test output should include:
 
 ```json
-"capture_backend": "arecord_pipe"
+{
+  "engine": "pocketsphinx_continuous_arecord_chunk",
+  "capture_backend": "arecord_chunk",
+  "chunk_seconds": 4.0,
+  "cooldown_seconds": 1.5
+}
 ```
 
-For an isolated hardware check that mirrors the packaged production path, run this finite command inside the container and say `computer` during the eight-second capture window:
+For an isolated hardware check that mirrors one packaged finite wake window, run this inside the container and say `computer` during the four-second capture window:
 
 ```bash
-docker compose exec voice-assistant sh -lc 'arecord -q -D plughw:0,0 -f S16_LE -r 16000 -c 1 -t raw -d 8 | pocketsphinx_continuous -infile /dev/stdin -samprate 16000 -hmm /usr/share/pocketsphinx/model/en-us/en-us -dict /usr/share/pocketsphinx/model/en-us/cmudict-en-us.dict -keyphrase computer -kws_threshold 1e-20 -logfn /dev/null'
+docker compose exec voice-assistant sh -lc 'arecord -q -D plughw:0,0 -f S16_LE -r 16000 -c 1 -t raw -d 4 | pocketsphinx_continuous -infile /dev/stdin -samprate 16000 -hmm /usr/share/pocketsphinx/model/en-us/en-us -dict /usr/share/pocketsphinx/model/en-us/cmudict-en-us.dict -keyphrase computer -kws_threshold 1e-20 -logfn /dev/null'
 ```
 
-The production app should not require this command for normal operation; it is only a hardware diagnostic equivalent of the source-controlled wrapper.
+The production app should not require this command for normal operation; it is only a hardware diagnostic equivalent of a single source-controlled wrapper window. The wrapper repeats that finite-window pattern continuously until the app pauses or stops it.

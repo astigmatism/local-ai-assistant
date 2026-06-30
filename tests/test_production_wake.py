@@ -82,7 +82,7 @@ def test_external_wake_parser_accepts_json_confidence_and_source():
     assert detection.engine == "external_command:test_detector"
 
 
-def test_pocketsphinx_wake_uses_arecord_pipe_not_pocketsphinx_live_mic():
+def test_pocketsphinx_wake_uses_finite_arecord_chunks_not_pocketsphinx_live_mic():
     args = pocketsphinx_wake.build_parser().parse_args(
         ["--phrase", "computer", "--device", "plughw:0,0", "--sample-rate", "16000"]
     )
@@ -95,8 +95,12 @@ def test_pocketsphinx_wake_uses_arecord_pipe_not_pocketsphinx_live_mic():
     assert "S16_LE" in capture_command
     assert "-r" in capture_command
     assert "16000" in capture_command
+    assert "-c" in capture_command
+    assert "1" in capture_command
     assert "-t" in capture_command
     assert "raw" in capture_command
+    assert "-d" in capture_command
+    assert "4" in capture_command
     assert "pocketsphinx_continuous" in decoder_command
     assert "-infile" in decoder_command
     assert "/dev/stdin" in decoder_command
@@ -106,7 +110,7 @@ def test_pocketsphinx_wake_uses_arecord_pipe_not_pocketsphinx_live_mic():
     assert "-adcdev" not in decoder_command
 
 
-def test_pocketsphinx_wake_run_pipes_arecord_to_decoder_and_emits_json(tmp_path, monkeypatch, capsys):
+def test_pocketsphinx_wake_run_pipes_one_finite_chunk_to_decoder_and_emits_json(tmp_path, monkeypatch, capsys):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     arecord = bin_dir / "arecord"
@@ -133,7 +137,20 @@ def test_pocketsphinx_wake_run_pipes_arecord_to_decoder_and_emits_json(tmp_path,
     dict_path = tmp_path / "dict.txt"
     dict_path.write_text("COMPUTER K AH M P Y UW T ER\n")
     args = pocketsphinx_wake.build_parser().parse_args(
-        ["--phrase", "computer", "--device", "fake", "--hmm", str(hmm), "--dict", str(dict_path)]
+        [
+            "--phrase",
+            "computer",
+            "--device",
+            "fake",
+            "--hmm",
+            str(hmm),
+            "--dict",
+            str(dict_path),
+            "--max-chunks",
+            "1",
+            "--cooldown-seconds",
+            "0",
+        ]
     )
 
     assert pocketsphinx_wake.run(args) == 0
@@ -143,7 +160,80 @@ def test_pocketsphinx_wake_run_pipes_arecord_to_decoder_and_emits_json(tmp_path,
     payload = json.loads(output_lines[0])
     assert payload["event"] == "wake"
     assert payload["phrase"] == "computer"
-    assert payload["engine"] == "pocketsphinx_continuous_arecord_pipe"
+    assert payload["engine"] == "pocketsphinx_continuous_arecord_chunk"
+
+
+def test_pocketsphinx_wake_loop_continues_across_empty_finite_chunks(tmp_path, monkeypatch, capsys):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    counter = tmp_path / "count.txt"
+    arecord = bin_dir / "arecord"
+    decoder = bin_dir / "pocketsphinx_continuous"
+    arecord.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdout.buffer.write(b'\\0' * 3200)\n"
+        "sys.stdout.flush()\n"
+    )
+    decoder.write_text(
+        "#!/usr/bin/env python3\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        f"counter = Path({str(counter)!r})\n"
+        "try:\n"
+        "    value = int(counter.read_text())\n"
+        "except FileNotFoundError:\n"
+        "    value = 0\n"
+        "counter.write_text(str(value + 1))\n"
+        "sys.stdin.buffer.read()\n"
+        "if value == 1:\n"
+        "    print('computer', flush=True)\n"
+    )
+    arecord.chmod(0o755)
+    decoder.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(pocketsphinx_wake.shutil, "which", lambda name: None if name == "stdbuf" else str(bin_dir / name))
+    monkeypatch.setattr(pocketsphinx_wake.time, "sleep", lambda seconds: None)
+    args = pocketsphinx_wake.build_parser().parse_args(
+        ["--phrase", "computer", "--device", "fake", "--max-chunks", "2", "--cooldown-seconds", "1.25"]
+    )
+
+    assert pocketsphinx_wake.run(args) == 0
+    output_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+
+    assert len(output_lines) == 1
+    payload = json.loads(output_lines[0])
+    assert payload["engine"] == "pocketsphinx_continuous_arecord_chunk"
+    assert payload["capture_backend"] == "arecord_chunk"
+    assert payload["phrase"] == "computer"
+    assert counter.read_text() == "2"
+
+
+def test_pocketsphinx_self_test_reports_chunk_backend(tmp_path, monkeypatch, capsys):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ["arecord", "pocketsphinx_continuous", "stdbuf"]:
+        command = bin_dir / name
+        command.write_text("#!/bin/sh\nexit 0\n")
+        command.chmod(0o755)
+    monkeypatch.setattr(pocketsphinx_wake.shutil, "which", lambda name: str(bin_dir / name))
+    hmm = tmp_path / "hmm"
+    hmm.mkdir()
+    dict_path = tmp_path / "dict.txt"
+    dict_path.write_text("COMPUTER K AH M P Y UW T ER\n")
+    args = pocketsphinx_wake.build_parser().parse_args(
+        ["--phrase", "computer", "--hmm", str(hmm), "--dict", str(dict_path), "--self-test"]
+    )
+
+    assert pocketsphinx_wake.self_test(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["engine"] == "pocketsphinx_continuous_arecord_chunk"
+    assert payload["capture_backend"] == "arecord_chunk"
+    assert payload["chunk_seconds"] == pytest.approx(4.0)
+    assert payload["cooldown_seconds"] == pytest.approx(1.5)
+    assert "-d" in payload["arecord_command"]
+
 
 
 @pytest.mark.asyncio
@@ -161,8 +251,11 @@ async def test_external_wake_engine_reads_stdout_detection_and_stops_process():
 
     assert len(detections) == 1
     assert detections[0].confidence == pytest.approx(0.91)
-    assert engine.status()["process_running"] is False
-    assert engine.status()["detection_count"] == 1
+    status = engine.status()
+    assert status["process_running"] is False
+    assert status["detection_count"] == 1
+    assert status["packaged_backend"] == "pocketsphinx_continuous_arecord_chunk"
+    assert status["channels"] == 1
 
 
 @pytest.mark.asyncio

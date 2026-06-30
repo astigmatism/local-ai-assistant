@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import os
+import signal
 import shutil
 import time
 from dataclasses import dataclass
@@ -84,11 +85,14 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
     """Runs a local wake-word process and treats each stdout wake line as a wake event.
 
     The bundled production command is ``python -m voice_assistant.pocketsphinx_wake``. It runs
-    ``arecord`` against the configured ALSA capture device, pipes raw 16 kHz mono PCM into
-    ``pocketsphinx_continuous -infile /dev/stdin``, and emits JSON wake events on stdout.
-    The adapter also preserves the legacy contract that non-empty stdout lines are wake events,
-    so custom external detectors can still be used if they write detections only to stdout and
-    diagnostic logs to stderr. Recent stderr lines are captured in status for deployment debugging.
+    a rolling loop of finite ``arecord -d N`` capture windows against the configured ALSA device,
+    pipes each raw 16 kHz mono PCM window into ``pocketsphinx_continuous -infile /dev/stdin``,
+    and emits JSON wake events on stdout after PocketSphinx receives EOF for a window. The finite
+    chunks are required on the target thin client because the successful hardware test needed
+    PocketSphinx to receive EOF for each short window. The adapter also preserves the legacy
+    contract that non-empty stdout lines are wake events, so custom external detectors can still be
+    used if they write detections only to stdout and diagnostic logs to stderr. Recent stderr lines
+    are captured in status for deployment debugging.
     """
 
     def __init__(
@@ -99,6 +103,7 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
         sensitivity: float = 0.5,
         capture_device: str = "plughw:0,0",
         sample_rate_hz: int = 16000,
+        channels: int = 1,
         model_path: str | None = None,
     ):
         if not command:
@@ -108,6 +113,7 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
         self.sensitivity = sensitivity
         self.capture_device = capture_device
         self.sample_rate_hz = sample_rate_hz
+        self.channels = channels
         self.model_path = model_path
         self._pause_event = asyncio.Event()
         self._current_process: asyncio.subprocess.Process | None = None
@@ -131,6 +137,7 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
                 "VOICE_ASSISTANT_WAKE_SENSITIVITY": str(self.sensitivity),
                 "VOICE_ASSISTANT_CAPTURE_DEVICE": self.capture_device,
                 "VOICE_ASSISTANT_SAMPLE_RATE_HZ": str(self.sample_rate_hz),
+                "VOICE_ASSISTANT_CHANNELS": str(self.channels),
             }
         )
         if self.model_path:
@@ -161,6 +168,7 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=self._environment(),
+                    start_new_session=True,
                 )
             except Exception as exc:
                 self._last_error = f"failed to start external wake command: {exc}"
@@ -294,14 +302,24 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
     async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
         if proc.returncode is not None:
             return
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
+        self._signal_external_process(proc, signal.SIGTERM)
         try:
-            await asyncio.wait_for(proc.wait(), timeout=1.0)
+            await asyncio.wait_for(proc.wait(), timeout=2.5)
         except asyncio.TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+            self._signal_external_process(proc, signal.SIGKILL)
             await proc.wait()
+
+    def _signal_external_process(self, proc: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+        if proc.pid is None:
+            return
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            with contextlib.suppress(ProcessLookupError):
+                if sig == signal.SIGTERM:
+                    proc.terminate()
+                else:
+                    proc.kill()
 
     def status(self) -> dict[str, Any]:
         executable = self.command[0] if self.command else ""
@@ -310,6 +328,10 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
             "mode": "production_local_subprocess",
             "production_ready": True,
             "input_source": "local microphone via external wake process",
+            "packaged_backend": "pocketsphinx_continuous_arecord_chunk",
+            "capture_device": self.capture_device,
+            "sample_rate_hz": self.sample_rate_hz,
+            "channels": self.channels,
             "command": list(self.command),
             "executable_available": bool(executable and shutil.which(executable)),
             "process_running": self._process_running,
@@ -479,6 +501,7 @@ def build_wake_engine(cfg: AssistantConfig) -> WakeWordEngine:
             sensitivity=cfg.wake.sensitivity,
             capture_device=cfg.audio.capture_device,
             sample_rate_hz=cfg.audio.sample_rate_hz,
+            channels=cfg.audio.channels,
             model_path=cfg.wake.model_path,
         )
     return SimulatedWakeWordEngine(cfg.wake.active_wake_phrase)
