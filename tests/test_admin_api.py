@@ -12,7 +12,10 @@ from voice_assistant.constants import EventType, SoundEvent
 ADMIN_SECTION_PATTERN = re.compile(
     r'<section class="admin-panel" data-admin-section="(?P<key>[^"]+)">\s*'
     r'<h2>\s*<button (?P<button_attrs>[^>]*?)>\s*(?P<button_inner>.*?)</button>\s*</h2>\s*'
-    r'<div (?P<body_attrs>[^>]*?)>(?P<body>.*?)</div>\s*</section>',
+    r'<div (?P<body_attrs>[^>]*?)>\s*'
+    r'<div (?P<content_attrs>[^>]*?)>\s*(?P<body>.*?)\s*</div>\s*'
+    r'<span (?P<resize_attrs>[^>]*?)>(?P<resize_text>.*?)</span>\s*'
+    r'</div>\s*</section>',
     re.S,
 )
 ATTR_PATTERN = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)(?:="([^"]*)")?')
@@ -36,6 +39,9 @@ def _admin_panels(html: str) -> list[dict[str, object]]:
                 "button_inner": match.group('button_inner'),
                 "body_attrs": _attrs(match.group('body_attrs')),
                 "body": match.group('body'),
+                "content_attrs": _attrs(match.group('content_attrs')),
+                "resize_attrs": _attrs(match.group('resize_attrs')),
+                "resize_text": match.group('resize_text').strip(),
             }
         )
     return panels
@@ -69,15 +75,29 @@ def test_admin_portal_top_level_sections_are_collapsed_by_default(bundle_parts):
     for panel in panels:
         button_attrs = panel["button_attrs"]
         body_attrs = panel["body_attrs"]
+        content_attrs = panel["content_attrs"]
+        resize_attrs = panel["resize_attrs"]
         assert isinstance(button_attrs, dict)
         assert isinstance(body_attrs, dict)
+        assert isinstance(content_attrs, dict)
+        assert isinstance(resize_attrs, dict)
         assert button_attrs["type"] == "button"
         assert button_attrs["aria-expanded"] == "false"
         assert button_attrs["onclick"] == "togglePanel(this)"
         assert button_attrs["aria-controls"] == body_attrs["id"]
+        assert "admin-panel-body" in body_attrs["class"].split()
+        assert "data-resizable-panel" in body_attrs
         assert body_attrs["role"] == "region"
         assert body_attrs["aria-labelledby"] == button_attrs["id"]
         assert "hidden" in body_attrs
+        assert "admin-panel-body-content" in content_attrs["class"].split()
+        assert "data-panel-content" in content_attrs
+        assert "admin-panel-resize-handle" in resize_attrs["class"].split()
+        assert "data-resize-handle" in resize_attrs
+        assert resize_attrs["role"] == "separator"
+        assert resize_attrs["aria-orientation"] == "horizontal"
+        assert resize_attrs["tabindex"] == "0"
+        assert panel["title"] in resize_attrs["aria-label"]
 
 
 def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundle_parts):
@@ -97,6 +117,31 @@ def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundl
             assert token in panels[title]
 
 
+def test_admin_portal_sections_are_resizable_scrollable_panels(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+    panels = _admin_panels(html)
+
+    assert ".admin-panel-body" in html
+    assert "height: 20rem" in html
+    assert "min-height: 12rem" in html
+    assert "max-height: min(75vh, 48rem)" in html
+    assert "resize: vertical" in html
+    assert "overflow: hidden" in html
+    assert ".admin-panel-body-content" in html
+    assert "overflow: auto" in html
+    assert ".admin-panel-body[hidden] { display: none; }" in html
+
+    assert len(panels) == html.count('class="admin-panel-resize-handle" data-resize-handle')
+    for panel in panels:
+        resize_attrs = panel["resize_attrs"]
+        assert isinstance(resize_attrs, dict)
+        assert resize_attrs["aria-valuemin"] == "180"
+        assert resize_attrs["aria-valuemax"] == "720"
+        assert resize_attrs["aria-valuenow"] == "320"
+        assert "Drag or use arrow keys to resize" == panel["resize_text"]
+
+
 def test_admin_portal_toggle_reveals_and_hides_without_replacing_form_state(bundle_parts):
     client, _ = make_client(bundle_parts)
     html = client.get("/").text
@@ -105,12 +150,39 @@ def test_admin_portal_toggle_reveals_and_hides_without_replacing_form_state(bund
     assert "const nextExpanded = button.getAttribute('aria-expanded') !== 'true';" in html
     assert "button.setAttribute('aria-expanded', String(nextExpanded));" in html
     assert "body.hidden = !nextExpanded;" in html
+    assert "section.dataset.expanded = String(nextExpanded);" in html
+    assert "if(nextExpanded && body){ updateResizeHandleValue(body); }" in html
     assert "state.textContent = nextExpanded ? 'Collapse -' : 'Expand +';" in html
     assert ".innerHTML" not in html
 
     config_panel = next(panel for panel in _admin_panels(html) if panel["title"] == "Configuration")
     assert 'textarea id="config"' in str(config_panel["body"])
     assert 'onclick="applyDraft()"' in str(config_panel["body"])
+
+
+def test_admin_portal_resize_script_changes_only_the_target_panel_height(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+
+    assert "function setPanelHeight(body, height)" in html
+    assert "body.style.height = clampPanelHeight(height) + 'px';" in html
+    assert "function beginPanelResize(event)" in html
+    assert "const body = handle.closest('.admin-panel-body');" in html
+    assert "setPanelHeight(body, startHeight + moveEvent.clientY - startY);" in html
+    assert "document.addEventListener('pointermove', resizePanel);" in html
+    assert "document.removeEventListener('pointermove', resizePanel);" in html
+    assert "initializeResizablePanels();" in html
+
+
+def test_admin_portal_resize_handle_supports_keyboard_adjustment(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+
+    assert "handle.addEventListener('keydown', resizePanelFromKeyboard);" in html
+    assert "event.key === 'ArrowDown'" in html
+    assert "event.key === 'ArrowUp'" in html
+    assert "event.key === 'Home'" in html
+    assert "event.key === 'End'" in html
 
 
 def test_admin_portal_collapsible_controls_are_keyboard_accessible_buttons(bundle_parts):
