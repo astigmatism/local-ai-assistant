@@ -88,6 +88,26 @@ def phrase_output_filename(phrase: str) -> str:
     return f"{sanitize_tts_sound_phrase(phrase)}.wav"
 
 
+def normalize_generated_tts_phrases(phrases: Iterable[str]) -> list[str]:
+    cleaned: list[str] = []
+    output_names: dict[str, str] = {}
+    for raw_phrase in phrases:
+        phrase = (raw_phrase or "").strip()
+        if not phrase:
+            continue
+        filename = phrase_output_filename(phrase)
+        existing_phrase = output_names.get(filename)
+        if existing_phrase is not None:
+            raise ValueError(
+                f"Generated TTS phrases {existing_phrase!r} and {phrase!r} both target {filename!r}"
+            )
+        output_names[filename] = phrase
+        cleaned.append(phrase)
+    if not cleaned:
+        raise ValueError("Generated TTS sound phrases must include at least one phrase")
+    return cleaned
+
+
 def _validate_wav(path: Path) -> dict[str, Any]:
     with wave.open(str(path), "rb") as wav:
         channels = wav.getnchannels()
@@ -113,9 +133,7 @@ async def regenerate_generated_tts_sounds(
     phrases: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     effective_config = config_with_tts_voice(config, voice)
-    phrase_list = [phrase for phrase in (phrases if phrases is not None else effective_config.sounds.generated_tts_phrases) if phrase.strip()]
-    if not phrase_list:
-        raise ValueError("No generated TTS sound phrases are configured")
+    phrase_list = normalize_generated_tts_phrases(phrases if phrases is not None else effective_config.sounds.generated_tts_phrases)
 
     sound_dir = Path(effective_config.sounds.library_dir)
     sound_dir.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,7 @@ from .tts_voices import (
     KOKORO_VOICE_SET,
     config_with_tts_voice,
     kokoro_voice_options,
+    normalize_generated_tts_phrases,
     phrase_output_filename,
     regenerate_generated_tts_sounds,
     validate_kokoro_voice,
@@ -56,6 +57,7 @@ class TtsVoiceTestRequest(BaseModel):
 
 class TtsVoiceApplyRequest(BaseModel):
     voice: str = Field(..., min_length=1)
+    phrases: list[str] | None = Field(default=None, min_length=1, max_length=100)
 
 
 class MicrophoneTestRequest(BaseModel):
@@ -206,7 +208,7 @@ INDEX_HTML = """
     <div id="panel-tts-voices" class="admin-panel-body" data-resizable-panel data-load-on-expand="loadTtsVoices" role="region" aria-labelledby="toggle-tts-voices" aria-hidden="true" hidden>
       <div id="panel-tts-voices-content" class="admin-panel-body-content" data-panel-content>
         <p>Select a Kokoro voice, test it through the assistant machine's configured physical speaker output, then commit it to <code>services.tts.voice</code>.</p>
-        <p class="warn">Committing a voice also regenerates and overwrites the configured generated assistant sound files for the generated phrase list. It does not delete unrelated uploaded sounds.</p>
+        <p class="warn">Committing a voice also regenerates and overwrites exactly the generated sound phrases listed below. It does not delete unrelated uploaded sounds.</p>
         <p>Configured voice: <strong id="ttsConfiguredVoice">not loaded</strong></p>
         <p>Selected test candidate: <strong id="ttsSelectedVoice">not loaded</strong> <span id="ttsCandidateNotice" class="warn"></span></p>
         <button onclick="loadTtsVoices()">Refresh Kokoro voice list</button>
@@ -214,8 +216,14 @@ INDEX_HTML = """
         <select id="ttsVoiceSelect" onchange="updateTtsVoiceSelection()"></select>
         <p><label for="ttsSampleText">Sample text</label></p>
         <textarea id="ttsSampleText" oninput="updateTtsVoiceSelection()">Hello, this is a test of this Kokoro voice.</textarea>
+        <p>Generated sound directory: <code id="ttsGeneratedSoundDirectory">not loaded</code></p>
+        <p><label for="ttsGeneratedPhrases">Generated sound phrases to overwrite, one per line</label></p>
+        <textarea id="ttsGeneratedPhrases" oninput="renderTtsGeneratedSoundPreview()" placeholder="wake ack&#10;prompt accepted&#10;command accepted"></textarea>
+        <p>Edit this list before applying. The apply action saves this phrase list to <code>sounds.generated_tts_phrases</code> and regenerates only these target WAV files using the selected Kokoro voice.</p>
+        <p>Target WAV files preview:</p>
+        <pre id="ttsGeneratedSoundFiles" data-runtime-output></pre>
         <button id="ttsTestButton" onclick="testTtsVoice()" disabled>Test selected voice through speakerphone</button>
-        <button id="ttsApplyButton" onclick="applyTtsVoice()" disabled>Commit selected voice and regenerate sounds</button>
+        <button id="ttsApplyButton" onclick="applyTtsVoice()" disabled>Commit selected voice and regenerate listed sounds</button>
         <pre id="ttsVoicesResult" data-runtime-output></pre>
       </div>
       <div class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-controls="panel-tts-voices-content" aria-label="Resize Text-to-Speech Voices section height" aria-valuemin="192" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</div>
@@ -419,7 +427,7 @@ function writeText(id, value){
   keepCollapsedPanelHidden(target);
 }
 function writeJson(id, value){ writeText(id, JSON.stringify(value, null, 2)); }
-let ttsVoiceState = { configuredVoice: '', voices: [], busy: false };
+let ttsVoiceState = { configuredVoice: '', voices: [], busy: false, soundDirectory: '' };
 function selectedTtsVoice(){
   const select = document.getElementById('ttsVoiceSelect');
   return select ? select.value : '';
@@ -427,6 +435,26 @@ function selectedTtsVoice(){
 function ttsSampleText(){
   const sample = document.getElementById('ttsSampleText');
   return sample ? sample.value.trim() : '';
+}
+function ttsGeneratedPhrases(){
+  const phrases = document.getElementById('ttsGeneratedPhrases');
+  if(!phrases){ return []; }
+  return phrases.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+function ttsPhraseOutputFilename(phrase){
+  let normalized = (phrase || '').trim();
+  if(normalized.normalize){ normalized = normalized.normalize('NFKD').replace(/[\u0300-\u036f]/g, ''); }
+  normalized = normalized.toLowerCase();
+  normalized = normalized.replace(/&/g, ' and ');
+  normalized = normalized.replace(/['’`]/g, '');
+  normalized = normalized.replace(/[^a-z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  return (normalized || 'sound') + '.wav';
+}
+function renderTtsGeneratedSoundPreview(){
+  const phrases = ttsGeneratedPhrases();
+  const files = phrases.map((phrase) => ({phrase, filename: ttsPhraseOutputFilename(phrase)}));
+  writeJson('ttsGeneratedSoundFiles', {sound_directory: ttsVoiceState.soundDirectory || 'configured sounds.library_dir', phrase_count: phrases.length, generated_sound_files: files});
+  updateTtsVoiceSelection();
 }
 function setTtsVoiceBusy(busy, message){
   ttsVoiceState.busy = busy;
@@ -446,13 +474,18 @@ function updateTtsVoiceSelection(){
   if(selectedTarget){ selectedTarget.textContent = selected || 'not selected'; }
   if(notice){ notice.textContent = configured && selected && configured !== selected ? 'Differs from the configured voice until committed.' : ''; }
   const readyForTest = Boolean(selected && ttsSampleText() && !ttsVoiceState.busy);
-  const readyForApply = Boolean(selected && !ttsVoiceState.busy);
+  const readyForApply = Boolean(selected && ttsGeneratedPhrases().length > 0 && !ttsVoiceState.busy);
   if(testButton){ testButton.disabled = !readyForTest; }
   if(applyButton){ applyButton.disabled = !readyForApply; }
 }
 function renderTtsVoiceOptions(data){
   ttsVoiceState.configuredVoice = data.configured_voice || '';
   ttsVoiceState.voices = Array.isArray(data.voices) ? data.voices : [];
+  ttsVoiceState.soundDirectory = data.generated_tts_sound_directory || '';
+  writeText('ttsGeneratedSoundDirectory', ttsVoiceState.soundDirectory || 'not loaded');
+  const phrasesBox = document.getElementById('ttsGeneratedPhrases');
+  if(phrasesBox && Array.isArray(data.generated_tts_phrases) && !phrasesBox.value.trim()){ phrasesBox.value = data.generated_tts_phrases.join('\n'); }
+  renderTtsGeneratedSoundPreview();
   const select = document.getElementById('ttsVoiceSelect');
   if(!select){ return; }
   select.textContent = '';
@@ -499,7 +532,7 @@ async function playSoundEvent(){ const eventName = encodeURIComponent(document.g
 async function refreshTtsVoiceState(){ const data = await j('/api/tts-voices'); renderTtsVoiceOptions(data); return data; }
 async function loadTtsVoices(){ writeJson('ttsVoicesResult', await refreshTtsVoiceState()); }
 async function testTtsVoice(){ if(ttsVoiceState.busy){ return; } setTtsVoiceBusy(true, 'Generating and playing the selected voice sample through the configured speakerphone output.'); try { const result = await j('/api/tts-voices/test', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({voice:selectedTtsVoice(), text:ttsSampleText()})}); writeJson('ttsVoicesResult', result); } finally { setTtsVoiceBusy(false); } }
-async function applyTtsVoice(){ if(ttsVoiceState.busy){ return; } if(!confirm('Commit this TTS voice and overwrite the generated assistant sound files for the configured phrase list?')) return; setTtsVoiceBusy(true, 'Committing the selected voice and regenerating generated assistant sounds.'); try { const result = await j('/api/tts-voices/apply', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({voice:selectedTtsVoice()})}); writeJson('ttsVoicesResult', result); await loadConfig(); await loadSounds(); await refreshTtsVoiceState(); writeJson('ttsVoicesResult', result); } finally { setTtsVoiceBusy(false); } }
+async function applyTtsVoice(){ if(ttsVoiceState.busy){ return; } const phrases = ttsGeneratedPhrases(); if(!phrases.length){ writeJson('ttsVoicesResult', {status:'error', message:'Enter at least one generated sound phrase before applying.'}); return; } if(!confirm('Commit this TTS voice and overwrite exactly '+phrases.length+' generated sound file(s) from the phrase list?')) return; setTtsVoiceBusy(true, 'Committing the selected voice and regenerating the listed generated assistant sounds.'); try { const result = await j('/api/tts-voices/apply', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({voice:selectedTtsVoice(), phrases})}); writeJson('ttsVoicesResult', result); await loadConfig(); await loadSounds(); const refreshed = await refreshTtsVoiceState(); writeJson('ttsVoicesResult', {apply_result: result, refreshed_voice_state: refreshed}); } finally { setTtsVoiceBusy(false); } }
 async function llmTtsTest(){ writeJson('tests', await j('/api/test/llm-tts', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('testText').value})})); }
 async function micTest(){ writeJson('tests', await j('/api/test/microphone', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({duration_seconds:5})})); }
 async function commandTest(){ writeJson('tests', await j('/api/test/command-recognition', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('commandText').value})})); }
@@ -658,6 +691,7 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
             "voices": voices,
             "voice_count": len(voices),
             "generated_tts_phrases": generated_phrases,
+            "generated_tts_sound_directory": cfg.sounds.library_dir,
             "generated_tts_sound_files": [phrase_output_filename(phrase) for phrase in generated_phrases],
             "sample_default": "Hello, this is a test of this Kokoro voice.",
             "playback_path": "assistant_physical_output",
@@ -720,6 +754,10 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
     @app.post("/api/tts-voices/apply")
     async def apply_tts_voice(request: TtsVoiceApplyRequest) -> dict[str, Any]:
         voice = _validate_voice_or_400(request.voice)
+        try:
+            phrases = normalize_generated_tts_phrases(request.phrases) if request.phrases is not None else None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"message": "Invalid generated TTS sound phrase list.", "error": _public_error(exc)}) from exc
         if bundle.tts_voice_operation_lock.locked():
             raise HTTPException(status_code=409, detail={"message": "Another TTS voice operation is already running."})
         async with bundle.tts_voice_operation_lock:
@@ -728,6 +766,8 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
             try:
                 saved_data = bundle.config_store.get_saved().public_dict()
                 saved_data["services"]["tts"]["voice"] = voice
+                if phrases is not None:
+                    saved_data["sounds"]["generated_tts_phrases"] = phrases
                 config_result = bundle.config_store.apply_config(saved_data)
                 config_updated = True
                 await bundle.runtime.reload_runtime_components()
@@ -739,20 +779,23 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
                     data={
                         "voice": voice,
                         "configuration_path": "services.tts.voice",
+                        "generated_tts_phrases_updated": phrases is not None,
+                        "generated_tts_phrase_count": len(phrases or bundle.config_store.get_active().sounds.generated_tts_phrases),
                         "pending_restart_paths": config_result.pending_restart_paths,
                         "applied_runtime_paths": config_result.applied_runtime_paths,
                     },
                 )
 
                 cfg = bundle.config_store.get_active()
+                phrases_to_generate = phrases or list(cfg.sounds.generated_tts_phrases)
                 bundle.telemetry.log_event(
                     EventType.SOUND,
                     "TTS-generated assistant sound regeneration started.",
                     component="admin",
                     success=True,
-                    data={"voice": voice, "phrase_count": len(cfg.sounds.generated_tts_phrases)},
+                    data={"voice": voice, "phrase_count": len(phrases_to_generate), "phrases": phrases_to_generate},
                 )
-                regeneration = await regenerate_generated_tts_sounds(cfg, bundle.runtime.tts_factory, voice=voice)
+                regeneration = await regenerate_generated_tts_sounds(cfg, bundle.runtime.tts_factory, voice=voice, phrases=phrases_to_generate)
             except ValidationError as exc:
                 _raise_config_validation_error(exc)
             except Exception as exc:
@@ -763,7 +806,7 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
                     component="admin",
                     success=False,
                     error=_public_error(exc),
-                    data={"voice": voice, "configuration_updated": config_updated},
+                    data={"voice": voice, "configuration_updated": config_updated, "generated_tts_phrases_updated": phrases is not None},
                 )
                 raise HTTPException(
                     status_code=502,
@@ -785,9 +828,10 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
                 "status": "ok",
                 "voice": voice,
                 "configuration_path": "services.tts.voice",
+                "generated_tts_phrases": phrases_to_generate,
                 "configuration_result": config_result.model_dump(mode="json"),
                 "regeneration": regeneration,
-                "message": "Committed the selected Kokoro voice and regenerated generated assistant sound files.",
+                "message": "Committed the selected Kokoro voice and regenerated the listed generated assistant sound files.",
             }
 
     @app.get("/api/telemetry/events")

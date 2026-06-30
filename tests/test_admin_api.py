@@ -131,7 +131,7 @@ def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundl
     expected_content = {
         "Status": ['id="status"', 'id="health"', 'loadWakeDebug()'],
         "Configuration": ['id="config"', 'applyDraft()', 'Edits are applied as a group'],
-        "Text-to-Speech Voices": ['id="ttsVoiceSelect"', 'loadTtsVoices()', 'ttsSampleText', 'testTtsVoice()', 'applyTtsVoice()', 'services.tts.voice'],
+        "Text-to-Speech Voices": ['id="ttsVoiceSelect"', 'loadTtsVoices()', 'ttsSampleText', 'ttsGeneratedPhrases', 'ttsGeneratedSoundFiles', 'testTtsVoice()', 'applyTtsVoice()', 'services.tts.voice', 'sounds.generated_tts_phrases'],
         "Sound Library": ['id="soundFile"', 'loadSounds()', 'empty string', 'command_thinking', 'playSoundEvent()'],
         "Diagnostics": ['id="testText"', 'llmTtsTest()', 'commandTest()'],
         "Telemetry": ['id="events"', 'loadEvents()', 'Search history'],
@@ -477,6 +477,11 @@ def test_tts_voices_section_renders_as_collapsible_admin_panel(bundle_parts):
     assert 'id="ttsVoiceSelect"' in fragment
     assert 'id="ttsSampleText"' in fragment
     assert "Hello, this is a test of this Kokoro voice." in fragment
+    assert 'id="ttsGeneratedSoundDirectory"' in fragment
+    assert 'id="ttsGeneratedPhrases"' in fragment
+    assert 'id="ttsGeneratedSoundFiles"' in fragment
+    assert "sounds.generated_tts_phrases" in fragment
+    assert "only these target WAV files" in fragment
     assert 'id="ttsTestButton"' in fragment
     assert 'id="ttsApplyButton"' in fragment
     assert "configured physical speaker output" in fragment
@@ -499,6 +504,7 @@ def test_tts_voice_list_endpoint_is_kokoro_only_and_shows_configured_voice(bundl
     assert "ff_siwis" in ids
     assert body["voice_count"] == len(KOKORO_VOICES)
     assert "chatterbox" not in str(body).lower()
+    assert body["generated_tts_sound_directory"] == store.get_saved().sounds.library_dir
     assert body["generated_tts_sound_files"] == [phrase_output_filename(phrase) for phrase in body["generated_tts_phrases"]]
 
 
@@ -510,11 +516,16 @@ def test_tts_voice_ui_wires_selection_sample_test_and_apply_controls(bundle_part
     assert "function renderTtsVoiceOptions(data)" in script
     assert "function updateTtsVoiceSelection()" in script
     assert "readyForTest = Boolean(selected && ttsSampleText() && !ttsVoiceState.busy)" in script
+    assert "readyForApply = Boolean(selected && ttsGeneratedPhrases().length > 0 && !ttsVoiceState.busy)" in script
+    assert "function ttsGeneratedPhrases()" in script
+    assert "function renderTtsGeneratedSoundPreview()" in script
+    assert "function ttsPhraseOutputFilename(phrase)" in script
     assert "async function testTtsVoice()" in script
     assert "/api/tts-voices/test" in script
     assert "voice:selectedTtsVoice(), text:ttsSampleText()" in script
     assert "async function applyTtsVoice()" in script
     assert "/api/tts-voices/apply" in script
+    assert "body:JSON.stringify({voice:selectedTtsVoice(), phrases})" in script
     assert "setTtsVoiceBusy(true" in script
 
 
@@ -618,6 +629,55 @@ def test_tts_voice_apply_persists_config_regenerates_sounds_and_keeps_uploads(bu
         assert (sound_dir / filename).exists()
     assert uploaded.exists()
     assert uploaded.read_bytes() == b"custom user upload"
+
+
+
+
+def test_tts_voice_apply_persists_edited_phrase_list_and_regenerates_only_listed_sounds(bundle_parts):
+    client, (store, telemetry, runtime, audio, stt, llm, tts) = make_client(bundle_parts)
+    sound_dir = Path(store.get_active().sounds.library_dir)
+    existing_default = sound_dir / "failure.wav"
+    existing_default.write_bytes(b"do not overwrite when omitted")
+    uploaded = sound_dir / "uploaded_custom.wav"
+    uploaded.write_bytes(b"custom user upload")
+
+    runtime.tts_factory = lambda _cfg: tts
+    phrases = ["wake ack", "admin ready", "extra prompt"]
+    expected_files = {phrase_output_filename(phrase) for phrase in phrases}
+
+    response = client.post("/api/tts-voices/apply", json={"voice": "bf_emma", "phrases": phrases})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["generated_tts_phrases"] == phrases
+    assert body["configuration_result"]["saved"]["sounds"]["generated_tts_phrases"] == phrases
+    assert store.get_saved().sounds.generated_tts_phrases == phrases
+    assert store.get_active().sounds.generated_tts_phrases == phrases
+    assert tts.inputs == phrases
+    assert {item["filename"] for item in body["regeneration"]["generated_files"]} == expected_files
+    for filename in expected_files:
+        assert (sound_dir / filename).exists()
+    assert existing_default.read_bytes() == b"do not overwrite when omitted"
+    assert uploaded.read_bytes() == b"custom user upload"
+
+
+def test_tts_voice_apply_rejects_empty_or_duplicate_phrase_targets_without_config_update(bundle_parts):
+    client, (store, *_rest) = make_client(bundle_parts)
+    original_saved = store.get_saved()
+
+    empty_response = client.post("/api/tts-voices/apply", json={"voice": "bf_emma", "phrases": ["", " "]})
+
+    assert empty_response.status_code == 400
+    assert "Invalid generated TTS sound phrase list" in empty_response.text
+    assert store.get_saved().services.tts.voice == original_saved.services.tts.voice
+    assert store.get_saved().sounds.generated_tts_phrases == original_saved.sounds.generated_tts_phrases
+
+    duplicate_response = client.post("/api/tts-voices/apply", json={"voice": "bf_emma", "phrases": ["Wake ack", "wake ack!"]})
+
+    assert duplicate_response.status_code == 400
+    assert "both target" in duplicate_response.text
+    assert store.get_saved().services.tts.voice == original_saved.services.tts.voice
+    assert store.get_saved().sounds.generated_tts_phrases == original_saved.sounds.generated_tts_phrases
 
 
 def test_tts_voice_apply_reports_regeneration_failure_after_config_update(bundle_parts):

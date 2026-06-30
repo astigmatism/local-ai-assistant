@@ -10,6 +10,7 @@ from voice_assistant.tts_voices import (
     KOKORO_VOICES,
     config_with_tts_voice,
     kokoro_voice_options,
+    normalize_generated_tts_phrases,
     phrase_output_filename,
     regenerate_generated_tts_sounds,
     sanitize_tts_sound_phrase,
@@ -58,6 +59,14 @@ def test_tts_sound_phrase_sanitization_matches_script_shape():
     assert sanitize_tts_sound_phrase("I'm ready & listening.") == "im_ready_and_listening"
     assert phrase_output_filename("Prompt accepted") == "prompt_accepted.wav"
     assert phrase_output_filename("!!!") == "sound.wav"
+
+
+def test_normalize_generated_tts_phrases_trims_blanks_and_rejects_duplicate_targets():
+    assert normalize_generated_tts_phrases([" wake ack ", "", "admin ready"]) == ["wake ack", "admin ready"]
+    with pytest.raises(ValueError, match="both target"):
+        normalize_generated_tts_phrases(["Wake ack", "wake ack!"])
+    with pytest.raises(ValueError, match="at least one phrase"):
+        normalize_generated_tts_phrases([" ", ""])
 
 
 async def test_regenerate_generated_tts_sounds_overwrites_only_phrase_files(tmp_path):
