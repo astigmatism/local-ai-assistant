@@ -84,10 +84,11 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
     """Runs a local wake-word process and treats each stdout wake line as a wake event.
 
     The bundled production command is ``python -m voice_assistant.pocketsphinx_wake``. It runs
-    PocketSphinx locally against the configured ALSA capture device and emits JSON wake events on
-    stdout. The adapter also preserves the legacy contract that non-empty stdout lines are wake
-    events, so custom external detectors can still be used if they write detections only to stdout
-    and diagnostic logs to stderr.
+    ``arecord`` against the configured ALSA capture device, pipes raw 16 kHz mono PCM into
+    ``pocketsphinx_continuous -infile /dev/stdin``, and emits JSON wake events on stdout.
+    The adapter also preserves the legacy contract that non-empty stdout lines are wake events,
+    so custom external detectors can still be used if they write detections only to stdout and
+    diagnostic logs to stderr. Recent stderr lines are captured in status for deployment debugging.
     """
 
     def __init__(
@@ -117,6 +118,8 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
         self._last_detection: dict[str, Any] | None = None
         self._last_raw_line: str | None = None
         self._last_error: str | None = None
+        self._last_stderr_line: str | None = None
+        self._stderr_tail: list[str] = []
         self._last_exit_code: int | None = None
         self._pid: int | None = None
 
@@ -156,7 +159,7 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
                 proc = await asyncio.create_subprocess_exec(
                     *self.command,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
                     env=self._environment(),
                 )
             except Exception as exc:
@@ -171,7 +174,10 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
             self._process_running = True
             self._pid = proc.pid
             self._last_error = None
+            self._last_stderr_line = None
+            self._stderr_tail = []
             backoff_seconds = 0.5
+            stderr_task = asyncio.create_task(self._read_stderr(proc))
             try:
                 while not stop_event.is_set() and not self._pause_event.is_set():
                     try:
@@ -190,6 +196,7 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
                     await callback(detection)
             finally:
                 await self._terminate(proc)
+                await self._finish_stderr_reader(stderr_task)
                 self._process_running = False
                 self._current_process = None
                 self._pid = None
@@ -199,10 +206,35 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
             if self._pause_event.is_set():
                 continue
             self._last_exit_code = proc.returncode
-            self._last_error = f"external wake command exited with code {proc.returncode}"
+            detail = f"external wake command exited with code {proc.returncode}"
+            if self._last_stderr_line:
+                detail = f"{detail}: {self._last_stderr_line}"
+            self._last_error = detail
             self._restart_count += 1
             await self._sleep_or_stop(stop_event, backoff_seconds)
             backoff_seconds = min(5.0, backoff_seconds * 2)
+
+    async def _read_stderr(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.stderr is None:
+            return
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                return
+            text = line.decode(errors="replace").strip()
+            if not text:
+                continue
+            self._last_stderr_line = text[:500]
+            self._stderr_tail.append(text[:500])
+            self._stderr_tail = self._stderr_tail[-10:]
+
+    async def _finish_stderr_reader(self, task: asyncio.Task[None]) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+        except asyncio.TimeoutError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     def parse_detection_line(self, text: str) -> WakeDetection | None:
         if not text:
@@ -288,6 +320,8 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
             "detection_count": self._detection_count,
             "last_detection": self._last_detection,
             "last_raw_line": self._last_raw_line,
+            "last_stderr_line": self._last_stderr_line,
+            "stderr_tail": list(self._stderr_tail),
             "last_exit_code": self._last_exit_code,
             "last_error": self._last_error,
             "admin_test_endpoint_available": True,

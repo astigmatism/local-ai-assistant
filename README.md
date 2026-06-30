@@ -152,7 +152,7 @@ Fresh production deployments default to the packaged local PocketSphinx external
 }
 ```
 
-The Dockerfile installs `pocketsphinx` and `pocketsphinx-en-us` at image build time, so no wake model is downloaded at runtime. The subprocess reads only local microphone audio and emits JSON wake detections to the app. During prompt capture the app pauses the wake subprocess so ALSA capture is owned by the prompt recorder; after capture it resumes wake listening for barge-in during STT, LLM, TTS, and playback.
+The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us` at image build time, so no wake model is downloaded at runtime. The packaged wake subprocess uses `arecord` to open the configured ALSA capture device and pipes raw 16 kHz mono PCM into `pocketsphinx_continuous -infile /dev/stdin`. It intentionally avoids PocketSphinx's `-inmic yes -adcdev ...` live microphone mode because that backend failed on the target EMEET/ALSA deployment while the `arecord` pipeline succeeded. The subprocess reads only local microphone audio and emits JSON wake detections to the app. During prompt capture the app pauses the wake subprocess so ALSA capture is owned by the prompt recorder; after capture it resumes wake listening for barge-in during STT, LLM, TTS, and playback.
 
 `simulated` remains available for admin/test diagnostics through `POST /api/test/wake`, but status, health, and the admin portal label it as diagnostic-only. `openwakeword` remains as an optional adapter, but the packaged production path no longer depends on its Python 3.12 optional dependency stack.
 
@@ -207,6 +207,7 @@ curl -sS http://192.168.1.23:8080/api/health
 ```
 
 `/api/status` should show `wake_engine` as `external_command`, not `simulated`.
+It should also show `wake.process_running` as `true`; if the subprocess exits, `wake.last_error` and `wake.stderr_tail` report the most recent wrapper/capture failure.
 
 To build with optional openWakeWord and Vosk dependencies:
 
@@ -264,7 +265,7 @@ pip install -e '.[test]'
 pytest
 ```
 
-The test suite covers defaults, production wake config validation and migration, external wake stdout parsing/process termination/pause-resume, health failures for missing wake dependencies/commands/runtime, config draft/apply/import/export, restart-pending service settings, local command whole-utterance matching, command recognition only after wake and prompt capture, conversation preservation/expiration/reset, normal prompt processing, invalid prompt handling, local commands, new conversation capture restart, LLM failure behavior, barge-in, prompt-capture wake handling, sound management, telemetry search, microphone artifacts, maintenance confirmations, and the LLM no-model router contract.
+The test suite covers defaults, production wake config validation and migration, the `arecord`-to-PocketSphinx production wake wrapper, external wake stdout parsing/process termination/pause-resume/stderr diagnostics, health failures for missing wake dependencies/commands/runtime, config draft/apply/import/export, restart-pending service settings, local command whole-utterance matching, command recognition only after wake and prompt capture, conversation preservation/expiration/reset, normal prompt processing, invalid prompt handling, local commands, new conversation capture restart, LLM failure behavior, barge-in, prompt-capture wake handling, sound management, telemetry search, microphone artifacts, maintenance confirmations, and the LLM no-model router contract.
 
 ## Security posture
 

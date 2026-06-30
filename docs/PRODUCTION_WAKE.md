@@ -8,9 +8,9 @@ This package now uses the existing `external_command` wake adapter as the produc
 python -m voice_assistant.pocketsphinx_wake
 ```
 
-The command wraps the local `pocketsphinx_continuous` keyword spotter, listens to the configured ALSA capture device, and emits one JSON line on stdout for each accepted wake detection. The main assistant supervises that subprocess, parses the JSON event, plays the wake acknowledgement, captures the prompt, and then resumes wake listening for barge-in during STT/LLM/TTS/playback.
+The command wraps the local `pocketsphinx_continuous` keyword spotter, but it does **not** use PocketSphinx's `-inmic yes` live microphone backend. The target thin client proved that `arecord -D plughw:0,0` can open the EMEET microphone while `pocketsphinx_continuous -inmic yes -adcdev plughw:0,0` exits with `Connection refused`. The packaged command therefore runs `arecord` as the capture process and pipes raw 16 kHz mono PCM into PocketSphinx with `-infile /dev/stdin`. It emits one JSON line on stdout for each accepted wake detection. The main assistant supervises that subprocess, parses the JSON event, plays the wake acknowledgement, captures the prompt, and then resumes wake listening for barge-in during STT/LLM/TTS/playback.
 
-This approach was selected because it avoids the failed `openwakeword` optional dependency path under the current Python 3.12 image, keeps wake detection local, uses Debian packages installed at image build time, and preserves the existing `external_command` abstraction for future wake engines.
+This approach was selected because it avoids the failed `openwakeword` optional dependency path under the current Python 3.12 image, keeps wake detection local, uses Debian packages installed at image build time, preserves the existing `external_command` abstraction for future wake engines, and matches the manual hardware test that successfully detected `computer` through an `arecord | pocketsphinx_continuous -infile /dev/stdin` pipeline.
 
 ## Changed behavior
 
@@ -45,7 +45,7 @@ docker compose build
 docker compose up -d
 ```
 
-The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us`. Docker Compose keeps the existing deployment shape: host networking, `/dev/snd` passthrough, the `audio` group, `./data` persistence, and restart policy `unless-stopped`.
+The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us`. `alsa-utils` supplies the always-on capture command used by the wake wrapper. Docker Compose keeps the existing deployment shape: host networking, `/dev/snd` passthrough, the `audio` group, `./data` persistence, and restart policy `unless-stopped`.
 
 The expected target values remain:
 
@@ -100,6 +100,7 @@ Expected signals:
 
 - `/api/status` shows `wake_engine: external_command` and `wake.mode: production_local_subprocess`.
 - `/api/status` shows the configured command `python -m voice_assistant.pocketsphinx_wake`.
+- `/api/status` shows `wake.process_running: true` after startup and after the migration reload completes.
 - `/api/health` includes passing `wake-word engine` and `wake-word runtime` checks.
 - `/api/wake/debug` shows recent real wake detections after voice tests and separately labels `/api/test/wake` as simulated/admin-only.
 
@@ -136,3 +137,17 @@ For advanced troubleshooting, run the wrapper self-test inside the container:
 ```bash
 docker compose exec voice-assistant python -m voice_assistant.pocketsphinx_wake --self-test
 ```
+
+The self-test output should include:
+
+```json
+"capture_backend": "arecord_pipe"
+```
+
+For an isolated hardware check that mirrors the packaged production path, run this finite command inside the container and say `computer` during the eight-second capture window:
+
+```bash
+docker compose exec voice-assistant sh -lc 'arecord -q -D plughw:0,0 -f S16_LE -r 16000 -c 1 -t raw -d 8 | pocketsphinx_continuous -infile /dev/stdin -samprate 16000 -hmm /usr/share/pocketsphinx/model/en-us/en-us -dict /usr/share/pocketsphinx/model/en-us/cmudict-en-us.dict -keyphrase computer -kws_threshold 1e-20 -logfn /dev/null'
+```
+
+The production app should not require this command for normal operation; it is only a hardware diagnostic equivalent of the source-controlled wrapper.

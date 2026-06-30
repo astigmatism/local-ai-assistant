@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 
 import pytest
 from pydantic import ValidationError
 
+from voice_assistant import pocketsphinx_wake
 from voice_assistant.config import (
     DEFAULT_PRODUCTION_WAKE_COMMAND,
     AssistantConfig,
@@ -80,6 +82,70 @@ def test_external_wake_parser_accepts_json_confidence_and_source():
     assert detection.engine == "external_command:test_detector"
 
 
+def test_pocketsphinx_wake_uses_arecord_pipe_not_pocketsphinx_live_mic():
+    args = pocketsphinx_wake.build_parser().parse_args(
+        ["--phrase", "computer", "--device", "plughw:0,0", "--sample-rate", "16000"]
+    )
+
+    capture_command = pocketsphinx_wake.build_arecord_command(args)
+    decoder_command = pocketsphinx_wake.build_pocketsphinx_command(args)
+
+    assert capture_command[:4] == ["arecord", "-q", "-D", "plughw:0,0"]
+    assert "-f" in capture_command
+    assert "S16_LE" in capture_command
+    assert "-r" in capture_command
+    assert "16000" in capture_command
+    assert "-t" in capture_command
+    assert "raw" in capture_command
+    assert "pocketsphinx_continuous" in decoder_command
+    assert "-infile" in decoder_command
+    assert "/dev/stdin" in decoder_command
+    assert "-keyphrase" in decoder_command
+    assert "computer" in decoder_command
+    assert "-inmic" not in decoder_command
+    assert "-adcdev" not in decoder_command
+
+
+def test_pocketsphinx_wake_run_pipes_arecord_to_decoder_and_emits_json(tmp_path, monkeypatch, capsys):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    arecord = bin_dir / "arecord"
+    decoder = bin_dir / "pocketsphinx_continuous"
+    arecord.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdout.buffer.write(b'\\0' * 6400)\n"
+        "sys.stdout.flush()\n"
+    )
+    decoder.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdin.buffer.read(1)\n"
+        "print('computer', flush=True)\n"
+        "sys.stdin.buffer.read()\n"
+    )
+    arecord.chmod(0o755)
+    decoder.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(pocketsphinx_wake.shutil, "which", lambda name: None if name == "stdbuf" else str(bin_dir / name))
+    hmm = tmp_path / "hmm"
+    hmm.mkdir()
+    dict_path = tmp_path / "dict.txt"
+    dict_path.write_text("COMPUTER K AH M P Y UW T ER\n")
+    args = pocketsphinx_wake.build_parser().parse_args(
+        ["--phrase", "computer", "--device", "fake", "--hmm", str(hmm), "--dict", str(dict_path)]
+    )
+
+    assert pocketsphinx_wake.run(args) == 0
+    output_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+
+    assert len(output_lines) == 1
+    payload = json.loads(output_lines[0])
+    assert payload["event"] == "wake"
+    assert payload["phrase"] == "computer"
+    assert payload["engine"] == "pocketsphinx_continuous_arecord_pipe"
+
+
 @pytest.mark.asyncio
 async def test_external_wake_engine_reads_stdout_detection_and_stops_process():
     script = "import json,time; print(json.dumps({'event':'wake','phrase':'computer','confidence':0.91}), flush=True); time.sleep(60)"
@@ -97,6 +163,25 @@ async def test_external_wake_engine_reads_stdout_detection_and_stops_process():
     assert detections[0].confidence == pytest.approx(0.91)
     assert engine.status()["process_running"] is False
     assert engine.status()["detection_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_external_wake_engine_surfaces_stderr_when_process_exits():
+    script = "import sys; print('arecord exited with code 1', file=sys.stderr, flush=True); sys.exit(1)"
+    engine = ExternalCommandWakeWordEngine([sys.executable, "-c", script], "computer")
+    stop_event = asyncio.Event()
+
+    async def callback(detection):  # pragma: no cover - script never emits detections
+        pass
+
+    task = asyncio.create_task(engine.run(callback, stop_event))
+    await _wait_for(lambda: engine.status()["last_exit_code"] == 1)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=3)
+    status = engine.status()
+    assert status["process_running"] is False
+    assert "arecord exited with code 1" in status["last_error"]
+    assert status["last_stderr_line"] == "arecord exited with code 1"
 
 
 @pytest.mark.asyncio
