@@ -10,7 +10,6 @@ Example:
   ./tools/generate_tts_sounds.sh af_heart "Yes?" "I'm listening." "Done."
 
 Environment:
-  FORCE=1        Overwrite existing generated files.
   PREVIEW=1      Play each generated file through the configured playback device.
   TTS_URL=...    Optional override. Defaults to services.tts.url from data/config.json.
   TTS_MODEL=...  Optional override. Defaults to services.tts.model from data/config.json or kokoro.
@@ -21,6 +20,7 @@ Behavior:
   - Generates WAV files through the Kokoro-compatible TTS endpoint.
   - Saves files into the configured sounds.library_dir, usually assets/sounds.
   - Uses the spoken phrase as the filename, lowercased and stripped of punctuation.
+  - Always overwrites the existing file for the same phrase.
   - Installs files with the same numeric owner/group as the sounds directory.
 EOF
 }
@@ -32,6 +32,15 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+TMP_FILES=()
+
+cleanup() {
+  if [[ "${#TMP_FILES[@]}" -gt 0 ]]; then
+    rm -f "${TMP_FILES[@]}"
+  fi
+}
+trap cleanup EXIT
 
 if [[ -f ".env" ]]; then
   set -a
@@ -147,6 +156,7 @@ echo "TTS model: $TTS_MODEL_EFFECTIVE"
 echo "Kokoro voice: $VOICE"
 echo "Sounds dir: $SOUNDS_DIR_EFFECTIVE"
 echo "Sounds owner: $SOUNDS_OWNER_GROUP"
+echo "Overwrite mode: always"
 echo
 
 for PHRASE in "$@"; do
@@ -154,22 +164,17 @@ for PHRASE in "$@"; do
   FINAL_NAME="${BASE_NAME}.wav"
   FINAL_PATH="${SOUNDS_DIR_EFFECTIVE%/}/${FINAL_NAME}"
 
-  if [[ -e "$FINAL_PATH" && "${FORCE:-0}" != "1" ]]; then
-    echo "SKIP: $FINAL_NAME already exists. Use FORCE=1 to overwrite."
-    continue
-  fi
-
   TMP_WAV="$(mktemp /tmp/voice-sound-XXXXXX.wav)"
   TMP_JSON="$(mktemp /tmp/voice-sound-request-XXXXXX.json)"
-
-  cleanup() {
-    rm -f "$TMP_WAV" "$TMP_JSON"
-  }
-  trap cleanup RETURN
+  TMP_FILES+=("$TMP_WAV" "$TMP_JSON")
 
   echo "Generating:"
   echo "  phrase: $PHRASE"
   echo "  file:   $FINAL_NAME"
+
+  if [[ -e "$FINAL_PATH" ]]; then
+    echo "  existing file found: overwriting"
+  fi
 
   make_request_json "$PHRASE" "$TMP_JSON"
 
@@ -195,5 +200,6 @@ for PHRASE in "$@"; do
     aplay -D "$PLAYBACK_DEVICE_EFFECTIVE" "$FINAL_PATH"
   fi
 
+  rm -f "$TMP_WAV" "$TMP_JSON"
   echo
 done
