@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .assistant import AssistantRuntime
 from .commands import CommandRegistry
@@ -76,6 +76,16 @@ def _sound_dir(cfg: AssistantConfig) -> Path:
     path = Path(cfg.sounds.library_dir)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _raise_config_validation_error(exc: ValidationError) -> None:
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "message": "Configuration validation failed.",
+            "errors": exc.errors(include_url=False, include_input=False),
+        },
+    ) from exc
 
 
 INDEX_HTML = """
@@ -434,7 +444,10 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
 
     @app.post("/api/config/draft")
     async def save_config_draft(patch: dict[str, Any]) -> dict[str, Any]:
-        draft = bundle.config_store.save_draft(patch)
+        try:
+            draft = bundle.config_store.save_draft(patch)
+        except ValidationError as exc:
+            _raise_config_validation_error(exc)
         bundle.telemetry.log_event(EventType.CONFIG, "Configuration draft saved.", component="admin", success=True)
         return {"draft": draft.public_dict()}
 
@@ -447,6 +460,8 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
                 result = bundle.config_store.apply_draft()
         except FileNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValidationError as exc:
+            _raise_config_validation_error(exc)
         await bundle.runtime.reload_runtime_components()
         bundle.telemetry.log_event(
             EventType.CONFIG,
@@ -489,7 +504,10 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
 
     @app.post("/api/config/import")
     async def import_config(imported: dict[str, Any]) -> dict[str, Any]:
-        draft = bundle.config_store.import_to_draft(imported)
+        try:
+            draft = bundle.config_store.import_to_draft(imported)
+        except ValidationError as exc:
+            _raise_config_validation_error(exc)
         bundle.telemetry.log_event(EventType.CONFIG, "Configuration imported to draft.", component="admin", success=True)
         return {"draft": draft.public_dict(), "message": "Imported configuration saved as draft; use apply to persist it."}
 

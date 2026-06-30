@@ -312,6 +312,44 @@ def test_config_export_import_preserves_command_thinking_sound_event(bundle_part
     assert imported.status_code == 200
     assert imported.json()["draft"]["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
 
+
+
+def test_config_draft_saves_command_thinking_sound_event(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    saved = client.get("/api/config").json()["saved"]
+    saved["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] = "command-thinking-custom.wav"
+
+    response = client.post("/api/config/draft", json=saved)
+
+    assert response.status_code == 200
+    assert response.json()["draft"]["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
+
+
+def test_config_draft_validation_errors_return_400_details(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    saved = client.get("/api/config").json()["saved"]
+    saved["sounds"]["event_files"]["command_ thinking"] = "command-thinking-custom.wav"
+
+    response = client.post("/api/config/draft", json=saved)
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["message"] == "Configuration validation failed."
+    assert any("command_thinking" in error["msg"] for error in detail["errors"])
+
+
+def test_config_apply_validation_errors_return_400_details(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    saved = client.get("/api/config").json()["saved"]
+    saved["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] = None
+
+    response = client.post("/api/config/apply", json={"config": saved})
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["message"] == "Configuration validation failed."
+    assert any(error["loc"][-1] == SoundEvent.COMMAND_THINKING.value for error in detail["errors"])
+
 def test_config_export_import_preserves_empty_sound_event_file(bundle_parts):
     client, _ = make_client(bundle_parts)
     saved = client.get("/api/config").json()["saved"]
