@@ -27,47 +27,72 @@ BRANCH="${BRANCH:-main}"
 
 TEST_MODE="${TEST_MODE:-container}"
 TEST_CMD="${TEST_CMD:-PYTHONPATH=src python -m pytest -q}"
+CONTAINER_TEST_PACKAGES="${CONTAINER_TEST_PACKAGES:-pytest}"
+CONTAINER_TEST_SETUP_CMD="${CONTAINER_TEST_SETUP_CMD:-python -m venv --system-site-packages /tmp/local-ai-assistant-test-venv && . /tmp/local-ai-assistant-test-venv/bin/activate && python -m pip install --no-cache-dir $CONTAINER_TEST_PACKAGES}"
 
 BUILD_NO_CACHE="${BUILD_NO_CACHE:-true}"
 
+VERIFY_BUILT_IMAGE_SOURCE="${VERIFY_BUILT_IMAGE_SOURCE:-true}"
 VERIFY_RUNNING_SOURCE="${VERIFY_RUNNING_SOURCE:-true}"
 CONTAINER_SOURCE_ROOT="${CONTAINER_SOURCE_ROOT:-/app/src}"
 PYTHON_PACKAGE_NAME="${PYTHON_PACKAGE_NAME:-voice_assistant}"
 
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8080/api/health}"
+STATUS_URL="${STATUS_URL:-http://127.0.0.1:8080/api/status}"
 HEALTH_RETRIES="${HEALTH_RETRIES:-30}"
 HEALTH_SLEEP_SECONDS="${HEALTH_SLEEP_SECONDS:-2}"
+
+LOCK_FILE="${LOCK_FILE:-/tmp/local-ai-assistant-update-and-restart.lock}"
+
+APP_RESTART_STARTED=0
+APP_RESTART_COMPLETED=0
+VERIFIER_FILE=""
+HEALTH_RESPONSE_FILE=""
 
 usage() {
   cat <<EOF
 Usage:
-  ./update_and_restart.sh
+  ./update-and-restart.sh
 
 Environment overrides:
   SERVICE=voice-assistant
   CONTAINER_NAME=local-voice-assistant
   REMOTE=origin
   BRANCH=main
+
   TEST_MODE=container|host
   TEST_CMD='PYTHONPATH=src python -m pytest -q'
+  CONTAINER_TEST_PACKAGES='pytest'
+  CONTAINER_TEST_SETUP_CMD='python -m venv --system-site-packages /tmp/local-ai-assistant-test-venv && . /tmp/local-ai-assistant-test-venv/bin/activate && python -m pip install --no-cache-dir pytest'
+
   BUILD_NO_CACHE=true|false
+
+  VERIFY_BUILT_IMAGE_SOURCE=true|false
   VERIFY_RUNNING_SOURCE=true|false
   CONTAINER_SOURCE_ROOT=/app/src
   PYTHON_PACKAGE_NAME=voice_assistant
+
   HEALTH_URL=http://127.0.0.1:8080/api/health
+  STATUS_URL=http://127.0.0.1:8080/api/status
   HEALTH_RETRIES=30
   HEALTH_SLEEP_SECONDS=2
+
+  LOCK_FILE=/tmp/local-ai-assistant-update-and-restart.lock
 
 Behavior:
   1. Refuses to run if tracked files have local changes.
   2. Pulls latest source with git pull --ff-only.
-  3. Builds the Docker Compose service with Docker cache disabled by default.
-  4. Runs tests.
-  5. Recreates/restarts the app only after tests pass.
-  6. Waits for the app health endpoint.
-  7. Verifies the running container uses the freshly built image.
-  8. Verifies the running container's /app/src Python source matches the pulled source.
-  9. Verifies the imported runtime Python package matches /app/src so stale site-packages installs cannot be served.
+  3. Calculates a hash of the pulled Python source tree.
+  4. Builds the Docker Compose service with Docker cache disabled by default.
+  5. Verifies the freshly built image contains the pulled /app/src source and matching installed package.
+  6. Runs tests.
+     - In container mode, a temporary venv is created in the one-off test container.
+     - pytest is installed into that temporary venv by default.
+     - The production/runtime image is not modified by this test setup.
+  7. Recreates/restarts the app only after tests pass.
+  8. Waits for the app health endpoint.
+  9. Verifies the running container's /app/src source matches the pulled source.
+  10. Verifies the imported runtime Python package matches /app/src so stale site-packages installs cannot be served.
 EOF
 }
 
@@ -75,10 +100,41 @@ log() {
   printf '\n== %s ==\n' "$*"
 }
 
+print_failure_state() {
+  if [[ "$APP_RESTART_STARTED" != "1" ]]; then
+    echo "Deployment stopped before application restart. The running application was not changed by this run." >&2
+  elif [[ "$APP_RESTART_COMPLETED" != "1" ]]; then
+    echo "Application restart was attempted but did not complete cleanly. Check docker compose ps and container logs." >&2
+  else
+    echo "Application restart completed, but a post-restart verification failed. Check docker compose ps and container logs." >&2
+  fi
+}
+
 fail() {
   echo "ERROR: $*" >&2
+  print_failure_state
   exit 1
 }
+
+on_error() {
+  local status=$?
+  echo "ERROR: deployment failed with exit status $status" >&2
+  print_failure_state
+  exit "$status"
+}
+
+cleanup() {
+  if [[ -n "$VERIFIER_FILE" ]]; then
+    rm -f "$VERIFIER_FILE"
+  fi
+
+  if [[ -n "$HEALTH_RESPONSE_FILE" ]]; then
+    rm -f "$HEALTH_RESPONSE_FILE"
+  fi
+}
+
+trap on_error ERR
+trap cleanup EXIT
 
 is_true() {
   case "${1,,}" in
@@ -111,20 +167,10 @@ hash_python_source_tree() {
   )
 }
 
-verify_running_container_source_consistency() {
-  local expected_source_hash="$1"
+write_source_verifier() {
+  VERIFIER_FILE="$(mktemp /tmp/local-ai-assistant-source-verify-XXXXXX.py)"
 
-  if ! is_true "$VERIFY_RUNNING_SOURCE"; then
-    echo "running source verification disabled"
-    return 0
-  fi
-
-  docker exec -i \
-    -e EXPECTED_SOURCE_HASH="$expected_source_hash" \
-    -e CONTAINER_SOURCE_ROOT="$CONTAINER_SOURCE_ROOT" \
-    -e PYTHON_PACKAGE_NAME="$PYTHON_PACKAGE_NAME" \
-    "$CONTAINER_NAME" \
-    python - <<'PY'
+  cat > "$VERIFIER_FILE" <<'PY'
 import hashlib
 import importlib
 import os
@@ -220,6 +266,76 @@ print(f"runtime_package_root: {runtime_package_root}")
 PY
 }
 
+verify_built_service_image_source_consistency() {
+  local expected_source_hash="$1"
+
+  if ! is_true "$VERIFY_BUILT_IMAGE_SOURCE"; then
+    echo "built image source verification disabled"
+    return 0
+  fi
+
+  [[ -n "$VERIFIER_FILE" ]] || fail "source verifier file has not been created"
+
+  docker compose run \
+    --rm \
+    --no-deps \
+    -T \
+    --entrypoint python \
+    -e EXPECTED_SOURCE_HASH="$expected_source_hash" \
+    -e CONTAINER_SOURCE_ROOT="$CONTAINER_SOURCE_ROOT" \
+    -e PYTHON_PACKAGE_NAME="$PYTHON_PACKAGE_NAME" \
+    "$SERVICE" - < "$VERIFIER_FILE"
+}
+
+verify_running_container_source_consistency() {
+  local expected_source_hash="$1"
+
+  if ! is_true "$VERIFY_RUNNING_SOURCE"; then
+    echo "running source verification disabled"
+    return 0
+  fi
+
+  [[ -n "$VERIFIER_FILE" ]] || fail "source verifier file has not been created"
+
+  docker exec -i \
+    -e EXPECTED_SOURCE_HASH="$expected_source_hash" \
+    -e CONTAINER_SOURCE_ROOT="$CONTAINER_SOURCE_ROOT" \
+    -e PYTHON_PACKAGE_NAME="$PYTHON_PACKAGE_NAME" \
+    "$CONTAINER_NAME" \
+    python - < "$VERIFIER_FILE"
+}
+
+run_tests() {
+  case "$TEST_MODE" in
+    container)
+      local container_test_command
+
+      if [[ -n "$CONTAINER_TEST_SETUP_CMD" ]]; then
+        container_test_command="$CONTAINER_TEST_SETUP_CMD && $TEST_CMD"
+      else
+        container_test_command="$TEST_CMD"
+      fi
+
+      echo "container test setup command: ${CONTAINER_TEST_SETUP_CMD:-none}"
+      echo "container test command: $TEST_CMD"
+
+      docker compose run \
+        --rm \
+        --no-deps \
+        -T \
+        --entrypoint sh \
+        "$SERVICE" \
+        -lc "$container_test_command"
+      ;;
+    host)
+      bash -lc "$TEST_CMD"
+      ;;
+    *)
+      fail "unsupported TEST_MODE: $TEST_MODE"
+      ;;
+  esac
+}
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
@@ -228,11 +344,12 @@ fi
 ROOT_DIR="$(cd "${UPDATE_RESTART_PROJECT_ROOT:-$(dirname "${BASH_SOURCE[0]}")}" && pwd)"
 cd "$ROOT_DIR"
 
-LOCK_FILE="$ROOT_DIR/.update_and_restart.lock"
+write_source_verifier
+
 exec 9>"$LOCK_FILE"
 
 if ! flock -n 9; then
-  fail "another update_and_restart.sh run is already active"
+  fail "another update-and-restart run is already active"
 fi
 
 log "Deployment start"
@@ -243,8 +360,11 @@ echo "container: $CONTAINER_NAME"
 echo "branch: $BRANCH"
 echo "test mode: $TEST_MODE"
 echo "test command: $TEST_CMD"
+echo "container test packages: $CONTAINER_TEST_PACKAGES"
 echo "build no cache: $BUILD_NO_CACHE"
+echo "verify built image source: $VERIFY_BUILT_IMAGE_SOURCE"
 echo "verify running source: $VERIFY_RUNNING_SOURCE"
+echo "lock file: $LOCK_FILE"
 
 log "Verify required commands"
 command -v git >/dev/null || fail "git is not installed"
@@ -316,46 +436,26 @@ fi
 
 docker compose build "${BUILD_ARGS[@]}" "$SERVICE"
 
-BUILT_IMAGE_ID="$(docker compose images -q "$SERVICE" 2>/dev/null | head -n 1 || true)"
-echo "built service image: ${BUILT_IMAGE_ID:-unknown}"
+log "Verify built image source and installed package"
+verify_built_service_image_source_consistency "$EXPECTED_SOURCE_HASH"
 
 log "Run tests"
-case "$TEST_MODE" in
-  container)
-    docker compose run --rm --no-deps --entrypoint sh "$SERVICE" -lc "$TEST_CMD"
-    ;;
-  host)
-    bash -lc "$TEST_CMD"
-    ;;
-  *)
-    fail "unsupported TEST_MODE: $TEST_MODE"
-    ;;
-esac
+run_tests
 
 log "Restart application"
+APP_RESTART_STARTED=1
 docker compose up -d --force-recreate "$SERVICE"
-
-log "Verify running container image"
-RUNNING_IMAGE="$(docker inspect "$CONTAINER_NAME" --format '{{.Image}}' 2>/dev/null || true)"
-echo "running container image: ${RUNNING_IMAGE:-unknown}"
-
-if [[ -n "$BUILT_IMAGE_ID" && -n "$RUNNING_IMAGE" ]]; then
-  BUILT_IMAGE_NORMALIZED="${BUILT_IMAGE_ID#sha256:}"
-  RUNNING_IMAGE_NORMALIZED="${RUNNING_IMAGE#sha256:}"
-
-  if [[ "$BUILT_IMAGE_NORMALIZED" != "$RUNNING_IMAGE_NORMALIZED" ]]; then
-    fail "running container image does not match the image built by this deployment"
-  fi
-fi
+APP_RESTART_COMPLETED=1
 
 log "Wait for health"
+HEALTH_RESPONSE_FILE="$(mktemp /tmp/local-ai-assistant-health-XXXXXX.json)"
+
 attempt=1
 while [[ "$attempt" -le "$HEALTH_RETRIES" ]]; do
-  if curl -fsS --max-time 5 "$HEALTH_URL" >/tmp/local-ai-assistant-health.json; then
+  if curl -fsS --max-time 5 "$HEALTH_URL" > "$HEALTH_RESPONSE_FILE"; then
     echo "healthy on attempt $attempt"
-    cat /tmp/local-ai-assistant-health.json
+    cat "$HEALTH_RESPONSE_FILE"
     echo
-    rm -f /tmp/local-ai-assistant-health.json
     break
   fi
 
@@ -376,7 +476,7 @@ verify_running_container_source_consistency "$EXPECTED_SOURCE_HASH"
 
 log "Final status"
 docker compose ps
-curl -sS --max-time 10 http://127.0.0.1:8080/api/status || true
+curl -sS --max-time 10 "$STATUS_URL" || true
 echo
 
 log "Deployment complete"
