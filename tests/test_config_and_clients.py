@@ -93,3 +93,16 @@ async def test_llm_client_post_to_router_omits_model_field(monkeypatch):
     assert text == "ok"
     assert captured["url"] == cfg.url
     assert "model" not in captured["json"]
+
+
+def test_tts_voice_change_is_runtime_applied_without_restart(tmp_path):
+    store = ConfigStore(tmp_path / "config.json")
+    data = store.get_saved().public_dict()
+    data["services"]["tts"]["voice"] = "bf_emma"
+
+    result = store.apply_config(data)
+
+    assert store.get_saved().services.tts.voice == "bf_emma"
+    assert store.get_active().services.tts.voice == "bf_emma"
+    assert "services.tts.voice" in result.applied_runtime_paths
+    assert "services.tts.voice" not in result.pending_restart_paths

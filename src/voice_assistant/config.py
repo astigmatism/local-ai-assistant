@@ -137,6 +137,17 @@ class CommandRegistryConfig(BaseModel):
 
 class SoundConfig(BaseModel):
     library_dir: str = "assets/sounds"
+    generated_tts_phrases: list[str] = Field(
+        default_factory=lambda: [
+            "wake ack",
+            "prompt accepted",
+            "command accepted",
+            "new conversation",
+            "failure",
+            "admin test",
+            "thinking",
+        ]
+    )
     event_files: dict[SoundEvent, str] = Field(
         default_factory=lambda: {
             SoundEvent.WAKE_ACK: "wake_ack.wav",
@@ -154,6 +165,15 @@ class SoundConfig(BaseModel):
             SoundEvent.ADMIN_TEST: "admin_test.wav",
         }
     )
+
+
+    @field_validator("generated_tts_phrases")
+    @classmethod
+    def generated_tts_phrases_non_empty(cls, value: list[str]) -> list[str]:
+        cleaned = [phrase.strip() for phrase in value if phrase and phrase.strip()]
+        if not cleaned:
+            raise ValueError("generated_tts_phrases must include at least one phrase")
+        return cleaned
 
     @model_validator(mode="before")
     @classmethod
@@ -308,7 +328,12 @@ def _flatten_diff_paths(left: Any, right: Any, prefix: str = "") -> list[str]:
     return []
 
 
+RUNTIME_APPLIED_SERVICE_PATHS = {"services.tts.voice"}
+
+
 def _requires_restart(path: str) -> bool:
+    if path in RUNTIME_APPLIED_SERVICE_PATHS:
+        return False
     return any(path == prefix or path.startswith(prefix + ".") for prefix in RESTART_REQUIRED_PREFIXES)
 
 
@@ -502,6 +527,7 @@ __all__ = [
     "ConfigApplyResult",
     "ValidationError",
     "RESTART_REQUIRED_PREFIXES",
+    "RUNTIME_APPLIED_SERVICE_PATHS",
     "DEFAULT_WAKE_PHRASE",
     "DEFAULT_PRODUCTION_WAKE_COMMAND",
     "DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND",

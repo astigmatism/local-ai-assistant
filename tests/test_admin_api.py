@@ -7,14 +7,16 @@ from fastapi.testclient import TestClient
 
 from voice_assistant.app import RuntimeBundle, create_app
 from voice_assistant.constants import EventType, SoundEvent
+from voice_assistant.tts_voices import KOKORO_VOICES, phrase_output_filename, sanitize_tts_sound_phrase
 
 
 SECTION_START_PATTERN = re.compile(r'<section\s+(?P<attrs>[^>]*data-admin-section="(?P<key>[^"]+)"[^>]*)>', re.S)
 ATTR_PATTERN = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)(?:="([^"]*)")?')
-KNOWN_ADMIN_SECTION_TITLES = {"Status", "Configuration", "Sound Library", "Diagnostics", "Telemetry"}
+KNOWN_ADMIN_SECTION_TITLES = {"Status", "Configuration", "Text-to-Speech Voices", "Sound Library", "Diagnostics", "Telemetry"}
 LAZY_LOADERS = {
     "status": "loadStatus",
     "configuration": "loadConfig",
+    "tts-voices": "loadTtsVoices",
     "sound-library": "loadSounds",
     "telemetry": "loadEvents",
 }
@@ -129,6 +131,7 @@ def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundl
     expected_content = {
         "Status": ['id="status"', 'id="health"', 'loadWakeDebug()'],
         "Configuration": ['id="config"', 'applyDraft()', 'Edits are applied as a group'],
+        "Text-to-Speech Voices": ['id="ttsVoiceSelect"', 'loadTtsVoices()', 'ttsSampleText', 'testTtsVoice()', 'applyTtsVoice()', 'services.tts.voice'],
         "Sound Library": ['id="soundFile"', 'loadSounds()', 'empty string', 'command_thinking', 'playSoundEvent()'],
         "Diagnostics": ['id="testText"', 'llmTtsTest()', 'commandTest()'],
         "Telemetry": ['id="events"', 'loadEvents()', 'Search history'],
@@ -158,6 +161,7 @@ def test_admin_portal_runtime_content_is_not_loaded_until_panel_expands(bundle_p
     panels = {str(panel["key"]): panel for panel in _admin_panels(html)}
 
     assert "loadStatus(); loadConfig(); loadEvents(); loadSounds();" not in script
+    assert "loadTtsVoices();" not in initializer
     assert "loadStatus();" not in initializer
     assert "loadConfig();" not in initializer
     assert "loadEvents();" not in initializer
@@ -458,3 +462,173 @@ def test_wake_debug_endpoint_distinguishes_production_from_simulated_admin(bundl
     assert body["wake_status"]["configured_engine"] == "external_command"
     assert body["simulated_admin_endpoint"] == "/api/test/wake"
     assert "not the simulated" in body["production_note"]
+
+
+def test_tts_voices_section_renders_as_collapsible_admin_panel(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+    panel = next(panel for panel in _admin_panels(html) if panel["title"] == "Text-to-Speech Voices")
+    fragment = str(panel["fragment"])
+
+    assert panel["key"] == "tts-voices"
+    assert 'data-load-on-expand="loadTtsVoices"' in fragment
+    assert 'id="ttsConfiguredVoice"' in fragment
+    assert 'id="ttsSelectedVoice"' in fragment
+    assert 'id="ttsVoiceSelect"' in fragment
+    assert 'id="ttsSampleText"' in fragment
+    assert "Hello, this is a test of this Kokoro voice." in fragment
+    assert 'id="ttsTestButton"' in fragment
+    assert 'id="ttsApplyButton"' in fragment
+    assert "configured physical speaker output" in fragment
+    assert "services.tts.voice" in fragment
+    assert "chatterbox" not in fragment.lower()
+
+
+def test_tts_voice_list_endpoint_is_kokoro_only_and_shows_configured_voice(bundle_parts):
+    client, (store, *_rest) = make_client(bundle_parts)
+
+    body = client.get("/api/tts-voices").json()
+    ids = [item["id"] for item in body["voices"]]
+
+    assert body["provider"] == "kokoro"
+    assert body["configured_voice"] == store.get_saved().services.tts.voice == "af_heart"
+    assert body["configured_voice_supported"] is True
+    assert ids == list(KOKORO_VOICES)
+    assert "af_heart" in ids
+    assert "bf_emma" in ids
+    assert "ff_siwis" in ids
+    assert body["voice_count"] == len(KOKORO_VOICES)
+    assert "chatterbox" not in str(body).lower()
+    assert body["generated_tts_sound_files"] == [phrase_output_filename(phrase) for phrase in body["generated_tts_phrases"]]
+
+
+def test_tts_voice_ui_wires_selection_sample_test_and_apply_controls(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+    script = _script_block(html)
+
+    assert "function renderTtsVoiceOptions(data)" in script
+    assert "function updateTtsVoiceSelection()" in script
+    assert "readyForTest = Boolean(selected && ttsSampleText() && !ttsVoiceState.busy)" in script
+    assert "async function testTtsVoice()" in script
+    assert "/api/tts-voices/test" in script
+    assert "voice:selectedTtsVoice(), text:ttsSampleText()" in script
+    assert "async function applyTtsVoice()" in script
+    assert "/api/tts-voices/apply" in script
+    assert "setTtsVoiceBusy(true" in script
+
+
+def test_tts_voice_sample_uses_selected_voice_physical_playback_and_does_not_persist(bundle_parts):
+    client, (store, telemetry, runtime, audio, stt, llm, tts) = make_client(bundle_parts)
+    voices_seen = []
+
+    def recording_tts_factory(cfg):
+        voices_seen.append(cfg.services.tts.voice)
+        return tts
+
+    runtime.tts_factory = recording_tts_factory
+    original_saved_voice = store.get_saved().services.tts.voice
+
+    response = client.post("/api/tts-voices/test", json={"voice": "bf_emma", "text": "Sample voice text."})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["voice"] == "bf_emma"
+    assert body["persisted"] is False
+    assert body["played_through"] == "assistant_physical_output"
+    assert voices_seen == ["bf_emma"]
+    assert tts.inputs == ["Sample voice text."]
+    assert ("play_file", body["tts_path"]) in audio.calls
+    assert ("play_file_require_playback", body["tts_path"]) in audio.calls
+    assert store.get_saved().services.tts.voice == original_saved_voice
+    assert store.get_active().services.tts.voice == original_saved_voice
+
+
+def test_tts_voice_sample_rejects_invalid_voice_without_exposing_secrets(bundle_parts):
+    client, (store, *_rest) = make_client(bundle_parts)
+
+    response = client.post("/api/tts-voices/test", json={"voice": "cb_fake", "text": "hello"})
+
+    assert response.status_code == 400
+    assert "Unsupported Kokoro voice" in response.text
+    assert "test-tts" not in response.text
+    assert store.get_saved().services.tts.voice == "af_heart"
+
+
+def test_tts_voice_sample_reports_tts_and_playback_failures(bundle_parts):
+    client, (store, telemetry, runtime, audio, stt, llm, tts) = make_client(bundle_parts)
+    tts.exc = RuntimeError("router unavailable")
+
+    response = client.post("/api/tts-voices/test", json={"voice": "bf_emma", "text": "hello"})
+
+    assert response.status_code == 502
+    assert "TTS voice sample generation or playback failed" in response.text
+    assert "test-tts" not in response.text
+
+    tts.exc = None
+
+    async def fail_playback(cfg, path, *, cancel_event=None, require_playback=False):
+        raise RuntimeError("speaker unavailable")
+
+    audio.play_file = fail_playback
+    playback_response = client.post("/api/tts-voices/test", json={"voice": "bf_emma", "text": "hello"})
+
+    assert playback_response.status_code == 502
+    assert "speaker unavailable" in playback_response.text
+    assert store.get_saved().services.tts.voice == "af_heart"
+
+
+def test_tts_voice_apply_persists_config_regenerates_sounds_and_keeps_uploads(bundle_parts):
+    client, (store, telemetry, runtime, audio, stt, llm, tts) = make_client(bundle_parts)
+    sound_dir = Path(store.get_active().sounds.library_dir)
+    uploaded = sound_dir / "uploaded_custom.wav"
+    uploaded.write_bytes(b"custom user upload")
+    voices_seen = []
+
+    def recording_tts_factory(cfg):
+        voices_seen.append(cfg.services.tts.voice)
+        return tts
+
+    runtime.tts_factory = recording_tts_factory
+    phrases = list(store.get_saved().sounds.generated_tts_phrases)
+    expected_files = {phrase_output_filename(phrase) for phrase in phrases}
+
+    response = client.post("/api/tts-voices/apply", json={"voice": "bf_emma"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["voice"] == "bf_emma"
+    assert body["configuration_path"] == "services.tts.voice"
+    assert body["configuration_result"]["saved"]["services"]["tts"]["voice"] == "bf_emma"
+    assert body["configuration_result"]["active"]["services"]["tts"]["voice"] == "bf_emma"
+    assert "services.tts.voice" in body["configuration_result"]["applied_runtime_paths"]
+    assert "services.tts.voice" not in body["configuration_result"]["pending_restart_paths"]
+    assert store.get_saved().services.tts.voice == "bf_emma"
+    assert store.get_active().services.tts.voice == "bf_emma"
+    assert client.get("/api/config").json()["saved"]["services"]["tts"]["voice"] == "bf_emma"
+    assert client.get("/api/config/export").json()["services"]["tts"]["voice"] == "bf_emma"
+    assert client.post("/api/config/import", json=client.get("/api/config/export").json()).json()["draft"]["services"]["tts"]["voice"] == "bf_emma"
+    assert tts.inputs == phrases
+    assert voices_seen == ["bf_emma"] * len(phrases)
+    regenerated = {item["filename"] for item in body["regeneration"]["generated_files"]}
+    assert regenerated == expected_files
+    for filename in expected_files:
+        assert (sound_dir / filename).exists()
+    assert uploaded.exists()
+    assert uploaded.read_bytes() == b"custom user upload"
+
+
+def test_tts_voice_apply_reports_regeneration_failure_after_config_update(bundle_parts):
+    client, (store, telemetry, runtime, audio, stt, llm, tts) = make_client(bundle_parts)
+    tts.exc = RuntimeError("tts generation failed")
+
+    response = client.post("/api/tts-voices/apply", json={"voice": "bf_emma"})
+
+    assert response.status_code == 502
+    body = response.json()["detail"]
+    assert body["configuration_updated"] is True
+    assert body["configuration_result"]["saved"]["services"]["tts"]["voice"] == "bf_emma"
+    assert store.get_saved().services.tts.voice == "bf_emma"
+    assert "test-tts" not in response.text
