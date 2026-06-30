@@ -143,6 +143,7 @@ class SoundConfig(BaseModel):
             SoundEvent.INVALID_PROMPT: "failure.wav",
             SoundEvent.PROMPT_ACCEPTED: "prompt_accepted.wav",
             SoundEvent.THINKING: "thinking.wav",
+            SoundEvent.COMMAND_THINKING: "thinking.wav",
             SoundEvent.CANCEL_ACCEPTED: "command_accepted.wav",
             SoundEvent.NEW_CONVERSATION_ACCEPTED: "new_conversation.wav",
             SoundEvent.STT_FAILURE: "failure.wav",
@@ -153,6 +154,29 @@ class SoundConfig(BaseModel):
             SoundEvent.ADMIN_TEST: "admin_test.wav",
         }
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def backfill_command_thinking_event(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        event_files = value.get("event_files")
+        if not isinstance(event_files, dict):
+            return value
+
+        command_key = SoundEvent.COMMAND_THINKING.value
+        if command_key in event_files or SoundEvent.COMMAND_THINKING in event_files:
+            return value
+
+        normalized_event_files = dict(event_files)
+        thinking_file = normalized_event_files.get(SoundEvent.THINKING.value)
+        if thinking_file is None:
+            thinking_file = normalized_event_files.get(SoundEvent.THINKING, "thinking.wav")
+        normalized_event_files[command_key] = thinking_file
+
+        normalized = dict(value)
+        normalized["event_files"] = normalized_event_files
+        return normalized
 
     @model_validator(mode="after")
     def all_events_configurable(self) -> "SoundConfig":
@@ -349,11 +373,13 @@ class ConfigStore:
         self.draft_path = self.config_path.with_suffix(".draft.json")
         self._lock = threading.RLock()
         self.defaults = AssistantConfig()
+        self._loaded_saved_data: dict[str, Any] | None = None
+        config_existed = self.config_path.exists()
         self.saved = self._load_saved()
         self.active = copy.deepcopy(self.saved)
         self.pending_restart_paths: list[str] = []
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.config_path.exists():
+        if not config_existed or self._loaded_saved_data != self.saved.public_dict():
             self._write_json(self.config_path, self.saved.public_dict())
 
     def _load_saved(self) -> AssistantConfig:
@@ -361,6 +387,7 @@ class ConfigStore:
             return AssistantConfig()
         with self.config_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
+        self._loaded_saved_data = copy.deepcopy(data)
         return migrate_legacy_default_wake_phrase(AssistantConfig.model_validate(data))
 
     @staticmethod

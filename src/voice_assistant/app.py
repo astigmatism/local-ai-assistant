@@ -167,8 +167,10 @@ INDEX_HTML = """
     <div id="panel-sound-library" class="admin-panel-body" data-resizable-panel data-load-on-expand="loadSounds" role="region" aria-labelledby="toggle-sound-library" aria-hidden="true" hidden>
       <div id="panel-sound-library-content" class="admin-panel-body-content" data-panel-content>
         <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio. Set a sound event file to an empty string to intentionally disable sound for that event.</p>
+        <p>Assign uploaded files in Configuration under <code>sounds.event_files</code>. Command thinking uses <code>command_thinking</code> for the local command interpretation phase.</p>
         <input id="soundFile" type="file" /> <button onclick="uploadSound()">Upload</button>
         <button onclick="loadSounds()">List sounds</button>
+        <input id="soundEventName" value="command_thinking" /> <button onclick="playSoundEvent()">Test configured sound event</button>
         <pre id="sounds" data-runtime-output></pre>
       </div>
       <div class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-controls="panel-sound-library-content" aria-label="Resize Sound Library section height" aria-valuemin="192" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</div>
@@ -363,6 +365,7 @@ async function saveDraft(){ const body = JSON.parse(document.getElementById('con
 async function applyDraft(){ writeJson('configResult', await j('/api/config/apply', {method:'POST', headers:{'content-type':'application/json'}, body:'{}'})); }
 async function uploadSound(){ const fd = new FormData(); const f = document.getElementById('soundFile').files[0]; fd.append('file', f); writeJson('sounds', await j('/api/sounds', {method:'POST', body:fd})); }
 async function loadSounds(){ writeJson('sounds', await j('/api/sounds')); }
+async function playSoundEvent(){ const eventName = encodeURIComponent(document.getElementById('soundEventName').value); writeJson('sounds', await j('/api/sound-events/'+eventName+'/play', {method:'POST'})); }
 async function llmTtsTest(){ writeJson('tests', await j('/api/test/llm-tts', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('testText').value})})); }
 async function micTest(){ writeJson('tests', await j('/api/test/microphone', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({duration_seconds:5})})); }
 async function commandTest(){ writeJson('tests', await j('/api/test/command-recognition', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('commandText').value})})); }

@@ -32,14 +32,19 @@ def write_wav(path: str | Path, duration: float = 0.02, sr: int = 16000) -> Path
 
 
 class FakeLoopHandle:
-    def __init__(self, calls: list[tuple[str, Any]]):
+    def __init__(self, calls: list[tuple[str, Any]], event_name: str):
         self.calls = calls
+        self.event_name = event_name
         self.stopped = False
-        calls.append(("thinking_start", None))
+        calls.append(("loop_start", event_name))
+        if event_name == str(SoundEvent.THINKING):
+            calls.append(("thinking_start", None))
 
     async def stop(self) -> None:
         self.stopped = True
-        self.calls.append(("thinking_stop", None))
+        self.calls.append(("loop_stop", self.event_name))
+        if self.event_name == str(SoundEvent.THINKING):
+            self.calls.append(("thinking_stop", None))
 
 
 class FakeAudio:
@@ -94,8 +99,9 @@ class FakeAudio:
         self.calls.append(("play_sound_event_end", event_name))
 
     def start_looping_sound(self, cfg, event):
-        self.calls.append(("loop_requested", str(event)))
-        return FakeLoopHandle(self.calls)
+        event_name = str(event)
+        self.calls.append(("loop_requested", event_name))
+        return FakeLoopHandle(self.calls, event_name)
 
     async def play_file(self, cfg, path, *, cancel_event=None):
         self.calls.append(("play_file", str(path)))

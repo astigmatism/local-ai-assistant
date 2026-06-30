@@ -385,12 +385,27 @@ class AssistantRuntime:
             conversation_id=conversation_id,
             interaction_id=interaction_id,
             component="local_command_recognizer",
+            data={"sound_event": SoundEvent.COMMAND_THINKING.value},
         )
-        command = await self._recognize_command_safely(cfg, capture, interaction_id, conversation_id)
+        command = await self._recognize_command_with_feedback(cfg, capture, interaction_id, conversation_id)
         if command:
             await self._handle_command(command, cfg, interaction_id, conversation_id)
             return
         await self._process_prompt(capture, cfg, interaction_id, conversation_id)
+
+    async def _recognize_command_with_feedback(
+        self,
+        cfg: AssistantConfig,
+        capture: CaptureResult,
+        interaction_id: str,
+        conversation_id: str,
+    ) -> CommandMatch | None:
+        command_thinking: LoopingSoundHandle | None = self.audio.start_looping_sound(cfg, SoundEvent.COMMAND_THINKING)
+        try:
+            return await self._recognize_command_safely(cfg, capture, interaction_id, conversation_id)
+        finally:
+            if command_thinking:
+                await command_thinking.stop()
 
     async def _recognize_command_safely(
         self,
@@ -412,6 +427,7 @@ class AssistantRuntime:
                 component="local_command_recognizer",
                 success=False,
                 error=str(exc),
+                data={"sound_event": SoundEvent.COMMAND_THINKING.value},
             )
             return None
         self.telemetry.log_event(
@@ -423,7 +439,7 @@ class AssistantRuntime:
             component="local_command_recognizer",
             command_intent=command.intent if command else None,
             success=True,
-            data={"matched": bool(command), "alias": command.alias if command else None},
+            data={"matched": bool(command), "alias": command.alias if command else None, "sound_event": SoundEvent.COMMAND_THINKING.value},
         )
         return command
 

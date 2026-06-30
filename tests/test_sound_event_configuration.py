@@ -32,6 +32,30 @@ def test_sound_event_configuration_accepts_empty_string_and_rejects_missing_even
         AssistantConfig.model_validate(missing)
 
 
+def test_legacy_config_missing_command_thinking_is_backfilled_from_thinking(tmp_path):
+    data = AssistantConfig().public_dict()
+    data["sounds"]["event_files"][SoundEvent.THINKING.value] = "current-thinking.wav"
+    data["sounds"]["event_files"].pop(SoundEvent.COMMAND_THINKING.value)
+
+    cfg = AssistantConfig.model_validate(data)
+
+    assert cfg.sounds.event_files[SoundEvent.COMMAND_THINKING] == "current-thinking.wav"
+
+
+def test_config_store_persists_backfilled_command_thinking_for_existing_files(tmp_path):
+    config_path = tmp_path / "config.json"
+    data = AssistantConfig().public_dict()
+    data["sounds"]["event_files"][SoundEvent.THINKING.value] = "legacy-thinking.wav"
+    data["sounds"]["event_files"].pop(SoundEvent.COMMAND_THINKING.value)
+    ConfigStore._write_json(config_path, data)
+
+    store = ConfigStore(config_path)
+
+    assert store.get_saved().sounds.event_files[SoundEvent.COMMAND_THINKING] == "legacy-thinking.wav"
+    reloaded = ConfigStore(config_path)
+    assert reloaded.get_saved().sounds.event_files[SoundEvent.COMMAND_THINKING] == "legacy-thinking.wav"
+
+
 async def test_empty_sound_event_is_safe_noop_without_play_file(monkeypatch, tmp_path):
     cfg = _config_with_event_file(tmp_path, SoundEvent.PROMPT_ACCEPTED, "")
     audio = AudioController()
@@ -79,6 +103,22 @@ async def test_empty_looping_sound_event_completes_without_playback(monkeypatch,
     handle = audio.start_looping_sound(cfg, SoundEvent.THINKING)
     await asyncio.sleep(0)
 
+    assert handle.task.done()
+    await handle.stop()
+
+
+async def test_empty_command_thinking_sound_is_safe_noop(monkeypatch, tmp_path):
+    cfg = _config_with_event_file(tmp_path, SoundEvent.COMMAND_THINKING, "")
+    audio = AudioController()
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("empty command_thinking must not attempt file playback")
+
+    monkeypatch.setattr(audio, "play_file", fail_if_called)
+
+    assert audio.resolve_sound_path(cfg, SoundEvent.COMMAND_THINKING) is None
+    handle = audio.start_looping_sound(cfg, SoundEvent.COMMAND_THINKING)
+    await asyncio.sleep(0)
     assert handle.task.done()
     await handle.stop()
 

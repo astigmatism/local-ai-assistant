@@ -129,7 +129,7 @@ def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundl
     expected_content = {
         "Status": ['id="status"', 'id="health"', 'loadWakeDebug()'],
         "Configuration": ['id="config"', 'applyDraft()', 'Edits are applied as a group'],
-        "Sound Library": ['id="soundFile"', 'loadSounds()', 'empty string'],
+        "Sound Library": ['id="soundFile"', 'loadSounds()', 'empty string', 'command_thinking', 'playSoundEvent()'],
         "Diagnostics": ['id="testText"', 'llmTtsTest()', 'commandTest()'],
         "Telemetry": ['id="events"', 'loadEvents()', 'Search history'],
     }
@@ -138,6 +138,17 @@ def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundl
         for token in tokens:
             assert token in panels[title]
 
+
+
+def test_admin_portal_displays_command_thinking_sound_event_controls(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+    sounds_payload = client.get("/api/sounds").json()
+
+    assert "Command thinking" in html
+    assert 'value="command_thinking"' in html
+    assert "function playSoundEvent()" in html
+    assert SoundEvent.COMMAND_THINKING.value in sounds_payload["event_files"]
 
 def test_admin_portal_runtime_content_is_not_loaded_until_panel_expands(bundle_parts):
     client, _ = make_client(bundle_parts)
@@ -283,6 +294,24 @@ def test_config_draft_apply_export_import_and_restart_pending(bundle_parts):
     assert client.post("/api/config/import", json=exported).status_code == 200
 
 
+
+def test_config_export_import_preserves_command_thinking_sound_event(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    saved = client.get("/api/config").json()["saved"]
+    saved["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] = "command-thinking-custom.wav"
+    saved["sounds"]["event_files"][SoundEvent.THINKING.value] = "thinking-custom.wav"
+
+    applied = client.post("/api/config/apply", json={"config": saved})
+
+    assert applied.status_code == 200
+    assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
+    assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.THINKING.value] == "thinking-custom.wav"
+    exported = client.get("/api/config/export").json()
+    assert exported["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
+    imported = client.post("/api/config/import", json=exported)
+    assert imported.status_code == 200
+    assert imported.json()["draft"]["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
+
 def test_config_export_import_preserves_empty_sound_event_file(bundle_parts):
     client, _ = make_client(bundle_parts)
     saved = client.get("/api/config").json()["saved"]
@@ -309,6 +338,15 @@ def test_sound_upload_list_play_delete(bundle_parts, tmp_path):
     sounds_payload = client.get("/api/sounds").json()
     assert "custom.wav" in sounds_payload["files"]
     assert "empty string" in sounds_payload["format_guidance"]
+    assert SoundEvent.COMMAND_THINKING.value in sounds_payload["event_files"]
+
+    saved = client.get("/api/config").json()["saved"]
+    saved["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] = "custom.wav"
+    saved["sounds"]["event_files"][SoundEvent.THINKING.value] = "thinking.wav"
+    assert client.post("/api/config/apply", json={"config": saved}).status_code == 200
+    assert client.post(f"/api/sound-events/{SoundEvent.COMMAND_THINKING.value}/play").status_code == 200
+    assert ("play_sound_event", str(SoundEvent.COMMAND_THINKING)) in audio.calls
+
     assert client.post("/api/sounds/custom.wav/play").status_code == 200
     assert client.delete("/api/sounds/custom.wav").status_code == 200
     assert "custom.wav" not in client.get("/api/sounds").json()["files"]

@@ -21,6 +21,7 @@ class SoundEvent(StrEnum):
     INVALID_PROMPT = "invalid_prompt"
     PROMPT_ACCEPTED = "prompt_accepted"
     THINKING = "thinking"
+    COMMAND_THINKING = "command_thinking"
     CANCEL_ACCEPTED = "cancel_accepted"
     NEW_CONVERSATION_ACCEPTED = "new_conversation_accepted"
     STT_FAILURE = "stt_failure"

@@ -170,6 +170,111 @@ def _first_call_index(calls, expected):
 def _event_sequence(telemetry):
     return [event.event_type for event in reversed(telemetry.query_events())]
 
+class RaisingCommandRecognizer:
+    async def recognize(self, audio_path, registry, hinted_text=None):
+        raise RuntimeError("command recognizer unavailable")
+
+
+class SlowOnceCommandRecognizer:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancelled = False
+        self.calls = 0
+
+    async def recognize(self, audio_path, registry, hinted_text=None):
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+        return None
+
+
+@pytest.mark.asyncio
+async def test_command_interpretation_uses_command_thinking_before_normal_processing(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = [None]
+    stt.outputs = ["ordinary prompt"]
+    llm.outputs = ["ordinary response"]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    command_event = str(SoundEvent.COMMAND_THINKING)
+    thinking_event = str(SoundEvent.THINKING)
+    command_start = _first_call_index(audio.calls, ("loop_requested", command_event))
+    command_stop = _first_call_index(audio.calls, ("loop_stop", command_event))
+    normal_thinking_start = _first_call_index(audio.calls, ("loop_requested", thinking_event))
+
+    assert command_start < command_stop < normal_thinking_start
+    assert stt.calls
+    command_started = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_STARTED))[0]
+    command_result = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT))[0]
+    assert command_started.data["sound_event"] == SoundEvent.COMMAND_THINKING.value
+    assert command_result.data["sound_event"] == SoundEvent.COMMAND_THINKING.value
+
+
+@pytest.mark.asyncio
+async def test_command_thinking_stops_before_command_acknowledgement(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = ["stop"]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    command_stop = _first_call_index(audio.calls, ("loop_stop", str(SoundEvent.COMMAND_THINKING)))
+    acknowledgement_start = _first_call_index(audio.calls, ("play_sound_event_start", str(SoundEvent.CANCEL_ACCEPTED)))
+
+    assert command_stop < acknowledgement_start
+    assert ("loop_requested", str(SoundEvent.THINKING)) not in audio.calls
+    assert stt.calls == []
+
+
+@pytest.mark.asyncio
+async def test_command_thinking_stops_when_command_recognition_fails_before_stt(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    runtime.command_recognizer = RaisingCommandRecognizer()
+    stt.outputs = ["fallback prompt"]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    command_stop = _first_call_index(audio.calls, ("loop_stop", str(SoundEvent.COMMAND_THINKING)))
+    normal_thinking_start = _first_call_index(audio.calls, ("loop_requested", str(SoundEvent.THINKING)))
+
+    assert command_stop < normal_thinking_start
+    assert stt.calls
+    failure_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT), errors_only=True)
+    assert failure_events[0].data["sound_event"] == SoundEvent.COMMAND_THINKING.value
+
+
+@pytest.mark.asyncio
+async def test_barge_in_during_command_interpretation_stops_command_thinking(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    recognizer = SlowOnceCommandRecognizer()
+    runtime.command_recognizer = recognizer
+    stt.outputs = ["after barge in"]
+    llm.outputs = ["after barge in response"]
+
+    await runtime.on_wake_detected(detection())
+    await asyncio.wait_for(recognizer.started.wait(), timeout=3)
+    assert runtime.state.state == RuntimeState.CHECKING_COMMAND
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    command_starts = [i for i, call in enumerate(audio.calls) if call == ("loop_requested", str(SoundEvent.COMMAND_THINKING))]
+    command_stops = [i for i, call in enumerate(audio.calls) if call == ("loop_stop", str(SoundEvent.COMMAND_THINKING))]
+    stop_all_index = _first_call_index(audio.calls, ("stop_all_playback", None))
+
+    assert recognizer.cancelled is True
+    assert command_starts and command_stops
+    assert command_starts[0] < stop_all_index < command_stops[0]
+    assert telemetry.query_events(event_type=str(EventType.BARGE_IN))
+
 
 @pytest.mark.asyncio
 async def test_wake_ack_playback_is_invoked_before_prompt_capture_starts(bundle_parts):

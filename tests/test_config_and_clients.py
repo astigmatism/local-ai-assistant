@@ -19,7 +19,19 @@ def test_default_configuration_matches_design_inventory(tmp_path):
         CommandIntent.NEW_CONVERSATION,
     }
     assert set(cfg.sounds.event_files) == set(SoundEvent)
+    assert cfg.sounds.event_files[SoundEvent.COMMAND_THINKING] == cfg.sounds.event_files[SoundEvent.THINKING]
+    assert SoundEvent.COMMAND_THINKING.value == "command_thinking"
 
+
+
+def test_command_thinking_sound_can_be_configured_independently():
+    data = AssistantConfig().public_dict()
+    data["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] = "command-thinking-custom.wav"
+
+    cfg = AssistantConfig.model_validate(data)
+
+    assert cfg.sounds.event_files[SoundEvent.COMMAND_THINKING] == "command-thinking-custom.wav"
+    assert cfg.sounds.event_files[SoundEvent.THINKING] == "thinking.wav"
 
 def test_restart_required_service_settings_are_saved_but_not_runtime_active(tmp_path):
     store = ConfigStore(tmp_path / "config.json")
