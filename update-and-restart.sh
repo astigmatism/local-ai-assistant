@@ -32,6 +32,7 @@ REQUIRE_TESTS="${REQUIRE_TESTS:-true}"
 CONTAINER_TEST_PACKAGES="${CONTAINER_TEST_PACKAGES:-pytest pytest-asyncio}"
 CONTAINER_TEST_WORKDIR="${CONTAINER_TEST_WORKDIR:-/workspace}"
 CONTAINER_TEST_VENV="${CONTAINER_TEST_VENV:-/tmp/local-ai-assistant-test-venv}"
+TEST_ENV_UNSET="${TEST_ENV_UNSET:-VOICE_ASSISTANT_CONFIG TTS_ROUTER_API_KEY WHISPER_API_KEY VOICE_ASSISTANT_POCKETSPHINX_CUSTOM_DICT VOICE_ASSISTANT_POCKETSPHINX_THRESHOLD VOICE_ASSISTANT_WAKE_COOLDOWN_SECONDS VOICE_ASSISTANT_WAKE_HOP_SECONDS VOICE_ASSISTANT_WAKE_WINDOW_SECONDS}"
 
 BUILD_NO_CACHE="${BUILD_NO_CACHE:-true}"
 
@@ -70,6 +71,7 @@ Environment overrides:
   CONTAINER_TEST_PACKAGES='pytest pytest-asyncio'
   CONTAINER_TEST_WORKDIR=/workspace
   CONTAINER_TEST_VENV=/tmp/local-ai-assistant-test-venv
+  TEST_ENV_UNSET='VOICE_ASSISTANT_CONFIG TTS_ROUTER_API_KEY WHISPER_API_KEY VOICE_ASSISTANT_POCKETSPHINX_CUSTOM_DICT VOICE_ASSISTANT_POCKETSPHINX_THRESHOLD VOICE_ASSISTANT_WAKE_COOLDOWN_SECONDS VOICE_ASSISTANT_WAKE_HOP_SECONDS VOICE_ASSISTANT_WAKE_WINDOW_SECONDS'
 
   BUILD_NO_CACHE=true|false
 
@@ -96,6 +98,7 @@ Behavior:
      - The production checkout is mounted read-only into a one-off test container.
      - A temporary test venv is created inside that one-off container.
      - pytest and pytest-asyncio are installed into that temporary venv.
+     - Production runtime env vars are unset before tests so tests use their expected defaults.
      - The runtime image and host checkout are not modified by test setup.
   7. Recreates/restarts the app only after tests pass.
   8. Waits for the app health endpoint.
@@ -328,6 +331,11 @@ echo "test command: ${TEST_CMD}"
 echo "test paths: ${TEST_PATHS}"
 echo "test packages: ${CONTAINER_TEST_PACKAGES}"
 echo "test venv: ${CONTAINER_TEST_VENV}"
+echo "test env unset: ${TEST_ENV_UNSET}"
+
+for var_name in ${TEST_ENV_UNSET}; do
+  unset "$var_name"
+done
 
 if [ "${REQUIRE_TESTS}" = "true" ]; then
   missing_paths=0
@@ -355,10 +363,13 @@ export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -p no:cacheprovider"
 
 echo "python used for tests: $(command -v python)"
 python - <<'PY'
+import os
 import pytest
 import sys
+
 print("pytest module:", pytest.__file__)
 print("python executable:", sys.executable)
+print("VOICE_ASSISTANT_WAKE_WINDOW_SECONDS:", os.environ.get("VOICE_ASSISTANT_WAKE_WINDOW_SECONDS"))
 PY
 
 sh -c "$TEST_CMD"
@@ -377,6 +388,7 @@ SH
     -e REQUIRE_TESTS="$REQUIRE_TESTS" \
     -e CONTAINER_TEST_PACKAGES="$CONTAINER_TEST_PACKAGES" \
     -e CONTAINER_TEST_VENV="$CONTAINER_TEST_VENV" \
+    -e TEST_ENV_UNSET="$TEST_ENV_UNSET" \
     "$SERVICE" \
     -c "$test_setup_script"
 }
@@ -425,6 +437,7 @@ echo "test command: $TEST_CMD"
 echo "test paths: $TEST_PATHS"
 echo "require tests: $REQUIRE_TESTS"
 echo "container test packages: $CONTAINER_TEST_PACKAGES"
+echo "test env unset: $TEST_ENV_UNSET"
 echo "build no cache: $BUILD_NO_CACHE"
 echo "verify built image source: $VERIFY_BUILT_IMAGE_SOURCE"
 echo "verify running source: $VERIFY_RUNNING_SOURCE"
