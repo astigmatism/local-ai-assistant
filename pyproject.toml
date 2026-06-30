@@ -35,6 +35,7 @@ test = [
 
 [project.scripts]
 voice-assistant = "voice_assistant.__main__:main"
+voice-assistant-pocketsphinx-wake = "voice_assistant.pocketsphinx_wake:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

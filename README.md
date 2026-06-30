@@ -11,7 +11,7 @@ The service is responsible for local wake-word orchestration, post-wake prompt c
 - Configurable local wake-word engine abstraction:
   - `simulated` for tests/admin diagnostics.
   - `openwakeword` adapter for local openWakeWord microphone inference.
-  - `external_command` adapter for a local wake-word process that emits detections.
+  - `external_command` adapter for a local wake-word process that emits detections; the packaged production command wraps local PocketSphinx keyword spotting for `computer`.
 - Local command registry with whole-utterance matching and only the two required v1 intents by default: `cancel_stop` and `new_conversation`.
 - Optional local Vosk command recognizer for command-audio transcription before main STT.
 - OpenAI-compatible Whisper STT client.
@@ -137,21 +137,7 @@ The `configured_text` recognizer is included for tests and admin diagnostics. It
 
 The service does not use downstream STT as a wake detector. Wake detection is local and state-dependent.
 
-The production options are:
-
-```json
-{
-  "wake": {
-    "engine": "openwakeword",
-    "wake_phrases": ["computer"],
-    "active_wake_phrase": "computer",
-    "model_path": "/models/computer.onnx",
-    "sensitivity": 0.5
-  }
-}
-```
-
-or:
+Fresh production deployments default to the packaged local PocketSphinx external command:
 
 ```json
 {
@@ -159,12 +145,26 @@ or:
     "engine": "external_command",
     "wake_phrases": ["computer"],
     "active_wake_phrase": "computer",
-    "external_command": ["/usr/local/bin/my-local-wake-engine", "--device", "plughw:0,0"]
+    "external_command": ["python", "-m", "voice_assistant.pocketsphinx_wake"],
+    "external_health_command": ["python", "-m", "voice_assistant.pocketsphinx_wake", "--self-test"],
+    "sensitivity": 0.5
   }
 }
 ```
 
-The `simulated` wake engine is the default so the container and unit tests start safely without pretending that a wake-word model path is available. Configure `openwakeword` or `external_command` on the thin client for real always-on wake listening.
+The Dockerfile installs `pocketsphinx` and `pocketsphinx-en-us` at image build time, so no wake model is downloaded at runtime. The subprocess reads only local microphone audio and emits JSON wake detections to the app. During prompt capture the app pauses the wake subprocess so ALSA capture is owned by the prompt recorder; after capture it resumes wake listening for barge-in during STT, LLM, TTS, and playback.
+
+`simulated` remains available for admin/test diagnostics through `POST /api/test/wake`, but status, health, and the admin portal label it as diagnostic-only. `openwakeword` remains as an optional adapter, but the packaged production path no longer depends on its Python 3.12 optional dependency stack.
+
+Existing deployments with persisted `data/config.json` may still have `wake.engine = simulated`. After deploying this version, migrate the saved wake config without editing source files:
+
+```bash
+curl -sS -X POST http://192.168.1.23:8080/api/config/migrate-production-wake \
+  -H 'content-type: application/json' \
+  -d '{"confirm":true}'
+```
+
+See `docs/PRODUCTION_WAKE.md` for build, migration, voice-only verification, and tuning steps.
 
 ## Docker deployment
 
@@ -189,7 +189,24 @@ docker compose up -d --build
 http://<assistant-thin-client-ip>:8080/
 ```
 
-The Compose file uses `network_mode: host`, mounts `/dev/snd`, adds the `audio` group, and persists data under `./data`.
+The Compose file uses `network_mode: host`, mounts `/dev/snd`, adds the `audio` group, and persists data under `./data`. The Dockerfile installs the packaged PocketSphinx wake detector dependencies by default.
+
+For an upgrade from an older simulated-wake deployment, rebuild/redeploy first, then run:
+
+```bash
+curl -sS -X POST http://192.168.1.23:8080/api/config/migrate-production-wake \
+  -H 'content-type: application/json' \
+  -d '{"confirm":true}'
+```
+
+Verify with:
+
+```bash
+curl -sS http://192.168.1.23:8080/api/status
+curl -sS http://192.168.1.23:8080/api/health
+```
+
+`/api/status` should show `wake_engine` as `external_command`, not `simulated`.
 
 To build with optional openWakeWord and Vosk dependencies:
 
@@ -228,8 +245,8 @@ amixer -c 0 sset PCM 100% unmute
 | Area | Endpoints |
 |---|---|
 | Portal | `GET /` |
-| Status/health | `GET /api/status`, `GET /api/health` |
-| Config | `GET /api/config`, `POST /api/config/draft`, `POST /api/config/apply`, `GET /api/config/export`, `POST /api/config/import` |
+| Status/health | `GET /api/status`, `GET /api/health`, `GET /api/wake/debug` |
+| Config | `GET /api/config`, `POST /api/config/draft`, `POST /api/config/apply`, `POST /api/config/migrate-production-wake`, `GET /api/config/export`, `POST /api/config/import` |
 | Telemetry | `GET /api/telemetry/events`, `GET /api/telemetry/live` |
 | Artifacts | `GET /api/artifacts`, `GET /api/artifacts/{id}/download` |
 | Sounds | `GET /api/sounds`, `POST /api/sounds`, `DELETE /api/sounds/{filename}`, `POST /api/sounds/{filename}/play`, `POST /api/sound-events/{event}/play` |
@@ -247,7 +264,7 @@ pip install -e '.[test]'
 pytest
 ```
 
-The test suite covers defaults, config draft/apply/import/export, restart-pending service settings, local command whole-utterance matching, conversation preservation/expiration/reset, normal prompt processing, invalid prompt handling, local commands, new conversation capture restart, LLM failure behavior, barge-in, prompt-capture wake handling, sound management, telemetry search, microphone artifacts, maintenance confirmations, and the LLM no-model router contract.
+The test suite covers defaults, production wake config validation and migration, external wake stdout parsing/process termination/pause-resume, health failures for missing wake dependencies/commands/runtime, config draft/apply/import/export, restart-pending service settings, local command whole-utterance matching, command recognition only after wake and prompt capture, conversation preservation/expiration/reset, normal prompt processing, invalid prompt handling, local commands, new conversation capture restart, LLM failure behavior, barge-in, prompt-capture wake handling, sound management, telemetry search, microphone artifacts, maintenance confirmations, and the LLM no-model router contract.
 
 ## Security posture
 

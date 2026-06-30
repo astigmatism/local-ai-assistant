@@ -3,7 +3,9 @@ services:
     build:
       context: .
       args:
-        # Set these to true if you want the image to include the optional local engines.
+        # openWakeWord remains optional. The packaged production wake path uses
+        # PocketSphinx CLI packages installed by the Dockerfile and the default
+        # wake.engine=external_command config.
         INSTALL_WAKE_EXTRAS: "false"
         INSTALL_COMMAND_VOSK: "false"
     container_name: local-voice-assistant

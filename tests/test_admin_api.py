@@ -84,3 +84,40 @@ def test_maintenance_requires_confirmation_and_is_safe_by_default(bundle_parts):
     assert confirmed["accepted"] is True
     assert confirmed["executed"] is False
     assert "disabled" in confirmed["output"]
+
+
+def test_admin_simulated_wake_is_labeled_diagnostic_only(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    response = client.post("/api/test/wake", json={"confidence": 1.0})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["diagnostic_only"] is True
+    assert "production" in body["message"]
+
+
+def test_admin_migrate_production_wake_endpoint_preserves_other_settings(bundle_parts):
+    client, (store, telemetry, *_rest) = make_client(bundle_parts)
+    saved = store.get_saved().public_dict()
+    saved["wake"]["engine"] = "simulated"
+    saved["wake"]["external_command"] = []
+    saved["wake"]["external_health_command"] = []
+    saved["prompt_capture"]["silence_duration_seconds"] = 1.9
+    store.apply_config(saved)
+
+    rejected = client.post("/api/config/migrate-production-wake", json={"confirm": False})
+    assert rejected.status_code == 400
+
+    response = client.post("/api/config/migrate-production-wake", json={"confirm": True})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["saved"]["wake"]["engine"] == "external_command"
+    assert body["saved"]["wake"]["external_command"] == ["python", "-m", "voice_assistant.pocketsphinx_wake"]
+    assert body["saved"]["prompt_capture"]["silence_duration_seconds"] == 1.9
+
+
+def test_wake_debug_endpoint_distinguishes_production_from_simulated_admin(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    body = client.get("/api/wake/debug").json()
+    assert body["wake_status"]["configured_engine"] == "external_command"
+    assert body["simulated_admin_endpoint"] == "/api/test/wake"
+    assert "not the simulated" in body["production_note"]

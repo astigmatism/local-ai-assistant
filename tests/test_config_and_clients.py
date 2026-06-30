@@ -51,3 +51,32 @@ def test_llm_client_never_sends_model_field():
     assert payload["stream"] is False
     assert payload["messages"][0]["content"] == "hello"
     assert "model" not in payload
+
+
+async def test_llm_client_post_to_router_omits_model_field(monkeypatch):
+    import httpx
+
+    captured = {}
+
+    class RecordingAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            captured["url"] = url
+            captured["json"] = json
+            request = httpx.Request("POST", url)
+            return httpx.Response(200, json={"message": {"content": "ok"}}, request=request)
+
+    monkeypatch.setattr(httpx, "AsyncClient", RecordingAsyncClient)
+    cfg = AssistantConfig().services.llm
+    text = await LLMClient(cfg).chat([{"role": "user", "content": "hello"}])
+    assert text == "ok"
+    assert captured["url"] == cfg.url
+    assert "model" not in captured["json"]

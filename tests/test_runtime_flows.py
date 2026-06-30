@@ -143,3 +143,21 @@ async def test_wake_during_prompt_capture_is_not_valid_new_wake(bundle_parts):
     assert runtime._current_task is None
     events = telemetry.query_events(event_type=str(EventType.WAKE_DETECTED))
     assert events[0].data["ignored_during_capture"] is True
+
+
+@pytest.mark.asyncio
+async def test_local_command_recognizer_runs_only_after_wake_and_prompt_capture(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    assert telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_STARTED)) == []
+    assert audio.calls == []
+
+    audio.command_texts = ["stop"]
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_STARTED))
+    assert len(events) == 1
+    prompt_start_index = [i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start"][0]
+    prompt_end_index = [i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_end"][0]
+    assert prompt_start_index < prompt_end_index
+    assert stt.calls == []

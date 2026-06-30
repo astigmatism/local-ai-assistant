@@ -12,6 +12,8 @@ RUN apt-get update \
        alsa-utils \
        ca-certificates \
        curl \
+       pocketsphinx \
+       pocketsphinx-en-us \
        sudo \
     && rm -rf /var/lib/apt/lists/*
 

@@ -33,6 +33,10 @@ class WakeTestRequest(BaseModel):
     confidence: float = 1.0
 
 
+class ProductionWakeMigrationRequest(BaseModel):
+    confirm: bool = False
+
+
 class LlmTtsTestRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
@@ -96,8 +100,12 @@ INDEX_HTML = """
   <section>
     <h2>Status</h2>
     <button onclick="loadStatus()">Refresh status</button>
-    <button onclick="simulateWake()">Simulate wake</button>
+    <button onclick="simulateWake()">Simulate wake (admin-only)</button>
+    <button onclick="loadHealth()">Refresh health</button>
+    <button onclick="loadWakeDebug()">Wake debug</button>
+    <button onclick="migrateProductionWake()">Migrate saved config to production wake</button>
     <pre id="status"></pre>
+    <pre id="health"></pre>
   </section>
   <section>
     <h2>Configuration</h2>
@@ -132,6 +140,9 @@ INDEX_HTML = """
 <script>
 async function j(url, opts={}) { const r = await fetch(url, opts); const t = await r.text(); try { return JSON.parse(t); } catch { return t; } }
 async function loadStatus(){ document.getElementById('status').textContent = JSON.stringify(await j('/api/status'), null, 2); }
+async function loadHealth(){ document.getElementById('health').textContent = JSON.stringify(await j('/api/health'), null, 2); }
+async function loadWakeDebug(){ document.getElementById('health').textContent = JSON.stringify(await j('/api/wake/debug'), null, 2); }
+async function migrateProductionWake(){ if(!confirm('Update saved config to the packaged local PocketSphinx production wake engine?')) return; document.getElementById('configResult').textContent = JSON.stringify(await j('/api/config/migrate-production-wake', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({confirm:true})}), null, 2); await loadStatus(); await loadConfig(); }
 async function simulateWake(){ document.getElementById('status').textContent = JSON.stringify(await j('/api/test/wake', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({confidence:1})}), null, 2); }
 async function loadConfig(){ const data = await j('/api/config'); document.getElementById('config').value = JSON.stringify(data.saved, null, 2); document.getElementById('configResult').textContent = JSON.stringify(data, null, 2); }
 async function saveDraft(){ const body = JSON.parse(document.getElementById('config').value); document.getElementById('configResult').textContent = JSON.stringify(await j('/api/config/draft', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)}), null, 2); }
@@ -176,9 +187,21 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
         cfg = bundle.config_store.get_active()
-        result = await HealthChecker(cfg).check_all()
+        result = await HealthChecker(cfg, wake_runtime_status=bundle.runtime.wake_status()).check_all()
         bundle.telemetry.log_event(EventType.HEALTH, "Health check completed.", component="admin", success=result["ok"], data=result)
         return result
+
+    @app.get("/api/wake/debug")
+    async def wake_debug() -> dict[str, Any]:
+        wake_events = bundle.telemetry.query_events(event_type=str(EventType.WAKE_DETECTED), limit=20)
+        barge_events = bundle.telemetry.query_events(event_type=str(EventType.BARGE_IN), limit=20)
+        return {
+            "wake_status": bundle.runtime.wake_status(),
+            "recent_wake_events": [event.model_dump(mode="json") for event in wake_events],
+            "recent_barge_in_events": [event.model_dump(mode="json") for event in barge_events],
+            "simulated_admin_endpoint": "/api/test/wake",
+            "production_note": "Normal input must come from the configured local wake engine, not the simulated/admin endpoint.",
+        }
 
     @app.get("/api/config")
     async def get_config() -> dict[str, Any]:
@@ -211,6 +234,29 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
             },
         )
         return result.model_dump(mode="json")
+
+    @app.post("/api/config/migrate-production-wake")
+    async def migrate_production_wake(request: ProductionWakeMigrationRequest) -> dict[str, Any]:
+        if not request.confirm:
+            raise HTTPException(status_code=400, detail="Set confirm=true to migrate saved wake config to the packaged production wake engine.")
+        result = bundle.config_store.migrate_to_production_wake()
+        await bundle.runtime.reload_runtime_components()
+        bundle.telemetry.log_event(
+            EventType.CONFIG,
+            "Saved configuration migrated to the packaged production wake engine.",
+            component="admin",
+            success=True,
+            data={
+                "wake_engine": result.saved["wake"]["engine"],
+                "external_command": result.saved["wake"].get("external_command"),
+                "active_wake_phrase": result.saved["wake"].get("active_wake_phrase"),
+                "applied_runtime_paths": result.applied_runtime_paths,
+            },
+        )
+        return {
+            **result.model_dump(mode="json"),
+            "message": "Saved config now uses the packaged local PocketSphinx external_command wake engine. Verify /api/status and /api/health, then use voice-only wake.",
+        }
 
     @app.get("/api/config/export")
     async def export_config() -> JSONResponse:
@@ -335,8 +381,12 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
     @app.post("/api/test/wake")
     async def wake_test(request: WakeTestRequest) -> dict[str, Any]:
         detection = await bundle.runtime.simulate_wake(request.confidence)
-        bundle.telemetry.log_event(EventType.ADMIN_TEST, "Admin wake-word test triggered.", component="admin", success=True, data=detection.__dict__)
-        return {"triggered": detection.__dict__}
+        bundle.telemetry.log_event(EventType.ADMIN_TEST, "Admin simulated wake-word test triggered; not a production input source.", component="admin", success=True, data=detection.__dict__)
+        return {
+            "triggered": detection.__dict__,
+            "diagnostic_only": True,
+            "message": "This endpoint injects a simulated/admin wake event for diagnostics. Normal production use must be voice-only through the configured local wake engine.",
+        }
 
     @app.post("/api/test/command-recognition")
     async def command_test(request: CommandRecognitionTestRequest) -> dict[str, Any]:

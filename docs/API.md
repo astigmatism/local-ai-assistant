@@ -7,9 +7,10 @@ The admin API has no authentication by v1 requirement. Keep it on a trusted loca
 ```http
 GET /api/status
 GET /api/health
+GET /api/wake/debug
 ```
 
-`/api/status` returns runtime state and current conversation metadata. `/api/health` checks wake engine availability, command recognizer, ALSA capture/playback, mixer volume, STT, LLM, and TTS reachability.
+`/api/status` returns runtime state, current conversation metadata, active wake engine, the configured wake phrase, production-vs-simulated mode, and wake process status. `/api/health` checks wake engine availability, wake runtime state, command recognizer, ALSA capture/playback, mixer volume, STT, LLM, and TTS reachability. `/api/wake/debug` returns wake status plus recent wake/barge-in telemetry and labels `/api/test/wake` as simulated/admin-only.
 
 ## Configuration
 
@@ -17,6 +18,7 @@ GET /api/health
 GET  /api/config
 POST /api/config/draft
 POST /api/config/apply
+POST /api/config/migrate-production-wake
 GET  /api/config/export
 POST /api/config/import
 ```
@@ -45,6 +47,20 @@ The response contains:
   "applied_runtime_paths": []
 }
 ```
+
+To migrate an existing persisted simulated-wake deployment to the packaged production wake engine:
+
+```http
+POST /api/config/migrate-production-wake
+```
+
+Body:
+
+```json
+{"confirm": true}
+```
+
+This updates only the saved wake source fields, preserves unrelated settings, writes `data/config.json`, and reloads the runtime wake listener.
 
 ## Telemetry and artifacts
 
@@ -94,6 +110,8 @@ POST /api/test/command-recognition
 POST /api/test/microphone
 POST /api/test/llm-tts
 ```
+
+`POST /api/test/wake` injects a simulated/admin wake event and is diagnostic-only. It is not the normal production input source.
 
 The typed LLM/TTS diagnostic sends text through the LLM and TTS path and plays generated speech through the thin client's speakerphone, not merely in the browser.
 

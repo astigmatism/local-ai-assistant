@@ -35,14 +35,52 @@ http://<assistant-ip>:8080/
 
 7. Run `/api/health` or the portal status/health controls.
 
-8. Configure the production wake engine:
+8. Verify the packaged production wake engine is active:
 
-- `openwakeword` with a local model path; or
-- `external_command` pointing at a dedicated local wake engine.
+```bash
+curl -sS http://<assistant-ip>:8080/api/status
+curl -sS http://<assistant-ip>:8080/api/health
+```
 
-9. Configure the local command recognizer for production command audio. Vosk is supported with a local model path. The default configured-text recognizer is intended for tests and diagnostics.
+`wake_engine` should be `external_command`, and the wake status should show `mode: production_local_subprocess`.
 
-10. Use the microphone test, sound tests, command-recognition test, and typed LLM/TTS test before enabling always-on unattended use.
+9. If this is an upgrade and the persisted config still says `wake.engine = simulated`, migrate it with the admin API:
+
+```bash
+curl -sS -X POST http://<assistant-ip>:8080/api/config/migrate-production-wake \
+  -H 'content-type: application/json' \
+  -d '{"confirm":true}'
+```
+
+10. Configure the local command recognizer for production command audio if desired. Vosk is supported with a local model path. The default configured-text recognizer is intended for tests and diagnostics.
+
+11. Use the microphone test, sound tests, command-recognition test, typed LLM/TTS test, and then a voice-only `computer` wake test before enabling unattended use.
+
+## Production wake verification
+
+The production wake process is packaged as:
+
+```text
+python -m voice_assistant.pocketsphinx_wake
+```
+
+Useful checks:
+
+```bash
+docker compose exec voice-assistant python -m voice_assistant.pocketsphinx_wake --self-test
+curl -sS http://<assistant-ip>:8080/api/wake/debug
+```
+
+Manual voice-only validation on the EMEET speakerphone:
+
+1. Say `computer` without pressing keys, opening the portal, using SSH, or posting to `/api/test/wake`.
+2. Hear the wake acknowledgement.
+3. Ask a short question.
+4. Hear the response.
+5. Check telemetry for wake, prompt capture, local command gate, STT, LLM, TTS, and playback events.
+6. Reboot the thin client and repeat the same voice-only test.
+
+During prompt capture, the app pauses the wake subprocess to release the ALSA microphone. It resumes wake listening after capture, so saying the wake phrase during STT, LLM, TTS, or playback acts as barge-in.
 
 ## Service restart and reboot
 
@@ -77,6 +115,16 @@ Artifact storage can be disabled with:
 Telemetry events continue to be stored even when WAV artifacts are disabled.
 
 ## Troubleshooting
+
+### Wake word does not trigger
+
+```bash
+curl -sS http://<assistant-ip>:8080/api/status
+curl -sS http://<assistant-ip>:8080/api/health
+docker compose exec voice-assistant python -m voice_assistant.pocketsphinx_wake --self-test
+```
+
+Confirm that `wake_engine` is not `simulated`, that the external wake command is available, and that the runtime/process is running. If `/api/status` still shows `simulated` after an upgrade, run the migration endpoint shown above.
 
 ### No audible playback
 

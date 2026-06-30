@@ -70,8 +70,23 @@ class AssistantRuntime:
             return
         self._wake_stop_event = asyncio.Event()
         self._wake_task = asyncio.create_task(self.wake_engine.run(self.on_wake_detected, self._wake_stop_event))
+        self._wake_task.add_done_callback(self._wake_task_finished)
         self._cleanup_task = asyncio.create_task(self._cleanup_scheduler_loop())
         self.state.set_state(RuntimeState.IDLE)
+
+    def _wake_task_finished(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        self.telemetry.log_event(
+            EventType.FAILURE,
+            "Wake-word listener stopped unexpectedly.",
+            component="wake",
+            success=False,
+            error=str(exc),
+        )
 
     async def stop(self) -> None:
         self._wake_stop_event.set()
@@ -270,8 +285,12 @@ class AssistantRuntime:
                 "silence_rms_threshold": cfg.prompt_capture.silence_rms_threshold,
             },
         )
-        capture_task = asyncio.create_task(self.audio.record_prompt(cfg, prompt_path, cancel_event=cancel_event))
-        capture = await capture_task
+        await self.wake_engine.pause("prompt_capture")
+        try:
+            capture_task = asyncio.create_task(self.audio.record_prompt(cfg, prompt_path, cancel_event=cancel_event))
+            capture = await capture_task
+        finally:
+            await self.wake_engine.resume()
         if wake_sound_task:
             # Do not let a still-playing acknowledgement overlap command/failure/processing cues.
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -584,12 +603,42 @@ class AssistantRuntime:
 
     def status(self) -> dict[str, object]:
         conv = self.conversation.snapshot()
+        wake = self.wake_status()
         return {
             "state": self.state.state.value,
             "conversation_id": conv.conversation_id,
             "conversation_message_count": len(conv.messages),
             "last_response_finished_at": conv.last_response_finished_at,
             "wake_engine": self.config_store.get_active().wake.engine,
+            "wake": wake,
+        }
+
+    def wake_status(self) -> dict[str, object]:
+        cfg = self.config_store.get_active()
+        task_running = bool(self._wake_task and not self._wake_task.done())
+        task_done = bool(self._wake_task and self._wake_task.done())
+        task_error = None
+        if self._wake_task and self._wake_task.done() and not self._wake_task.cancelled():
+            exc = self._wake_task.exception()
+            task_error = str(exc) if exc else None
+        engine_status = self.wake_engine.status()
+        production_ready = (
+            cfg.wake.engine != "simulated"
+            and task_running
+            and task_error is None
+            and bool(engine_status.get("production_ready", False))
+        )
+        return {
+            **engine_status,
+            "configured_engine": cfg.wake.engine,
+            "active_wake_phrase": cfg.wake.active_wake_phrase,
+            "wake_phrases": list(cfg.wake.wake_phrases),
+            "sensitivity": cfg.wake.sensitivity,
+            "task_running": task_running,
+            "task_done": task_done,
+            "task_error": task_error,
+            "production_ready": production_ready,
+            "simulated_admin_endpoint_available": True,
         }
 
     async def reload_runtime_components(self) -> None:
@@ -604,5 +653,6 @@ class AssistantRuntime:
             self.wake_engine = build_wake_engine(cfg)
             self._wake_stop_event = asyncio.Event()
             self._wake_task = asyncio.create_task(self.wake_engine.run(self.on_wake_detected, self._wake_stop_event))
+            self._wake_task.add_done_callback(self._wake_task_finished)
         else:
             self.wake_engine = build_wake_engine(cfg)

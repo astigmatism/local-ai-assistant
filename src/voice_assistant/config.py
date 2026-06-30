@@ -18,19 +18,47 @@ RESTART_REQUIRED_PREFIXES = {
     "services.tts",
 }
 
+DEFAULT_WAKE_PHRASE = "computer"
+DEFAULT_PRODUCTION_WAKE_COMMAND = ["python", "-m", "voice_assistant.pocketsphinx_wake"]
+DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND = [*DEFAULT_PRODUCTION_WAKE_COMMAND, "--self-test"]
+
 
 class WakeConfig(BaseModel):
-    engine: Literal["simulated", "openwakeword", "external_command"] = "simulated"
-    wake_phrases: list[str] = Field(default_factory=lambda: ["computer"])
-    active_wake_phrase: str = "computer"
+    engine: Literal["simulated", "openwakeword", "external_command"] = "external_command"
+    wake_phrases: list[str] = Field(default_factory=lambda: [DEFAULT_WAKE_PHRASE])
+    active_wake_phrase: str = DEFAULT_WAKE_PHRASE
     model_path: str | None = None
     sensitivity: float = Field(0.5, ge=0.0, le=1.0)
-    external_command: list[str] = Field(default_factory=list)
+    external_command: list[str] = Field(default_factory=lambda: list(DEFAULT_PRODUCTION_WAKE_COMMAND))
+    external_health_command: list[str] = Field(default_factory=lambda: list(DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND))
+
+    @field_validator("wake_phrases")
+    @classmethod
+    def wake_phrases_non_empty(cls, value: list[str]) -> list[str]:
+        cleaned = [phrase.strip() for phrase in value if phrase and phrase.strip()]
+        if not cleaned:
+            raise ValueError("wake_phrases must include at least one phrase")
+        return cleaned
+
+    @field_validator("active_wake_phrase")
+    @classmethod
+    def active_phrase_non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("active_wake_phrase must not be empty")
+        return value
+
+    @field_validator("external_command", "external_health_command")
+    @classmethod
+    def command_items_non_empty(cls, value: list[str]) -> list[str]:
+        return [item for item in value if item and item.strip()]
 
     @model_validator(mode="after")
-    def active_phrase_must_exist(self) -> "WakeConfig":
+    def validate_wake_engine_settings(self) -> "WakeConfig":
         if self.active_wake_phrase not in self.wake_phrases:
             raise ValueError("active_wake_phrase must be present in wake_phrases")
+        if self.engine == "external_command" and not self.external_command:
+            raise ValueError("external_command wake engine requires wake.external_command")
         return self
 
 
@@ -260,6 +288,28 @@ def _requires_restart(path: str) -> bool:
     return any(path == prefix or path.startswith(prefix + ".") for prefix in RESTART_REQUIRED_PREFIXES)
 
 
+def production_wake_config(config: AssistantConfig) -> AssistantConfig:
+    """Return a config with only the wake source migrated to the packaged production engine."""
+
+    data = config.public_dict()
+    wake = dict(data.get("wake", {}))
+    phrases = [str(phrase).strip() for phrase in wake.get("wake_phrases", []) if str(phrase).strip()]
+    active = str(wake.get("active_wake_phrase") or DEFAULT_WAKE_PHRASE).strip() or DEFAULT_WAKE_PHRASE
+    if active not in phrases:
+        phrases.append(active)
+    wake.update(
+        {
+            "engine": "external_command",
+            "wake_phrases": phrases,
+            "active_wake_phrase": active,
+            "external_command": list(DEFAULT_PRODUCTION_WAKE_COMMAND),
+            "external_health_command": list(DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND),
+        }
+    )
+    data["wake"] = wake
+    return AssistantConfig.model_validate(data)
+
+
 class ConfigStore:
     """Stores default, saved, active, and draft configuration.
 
@@ -368,6 +418,11 @@ class ConfigStore:
             dest_cursor = dest_cursor.setdefault(part, {})
         dest_cursor[parts[-1]] = copy.deepcopy(src_cursor[parts[-1]])
 
+    def migrate_to_production_wake(self) -> ConfigApplyResult:
+        with self._lock:
+            migrated = production_wake_config(self.saved)
+            return self.apply_config(migrated.public_dict())
+
     def mark_restart_completed(self) -> None:
         with self._lock:
             self.active = copy.deepcopy(self.saved)
@@ -393,4 +448,8 @@ __all__ = [
     "ConfigApplyResult",
     "ValidationError",
     "RESTART_REQUIRED_PREFIXES",
+    "DEFAULT_WAKE_PHRASE",
+    "DEFAULT_PRODUCTION_WAKE_COMMAND",
+    "DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND",
+    "production_wake_config",
 ]
