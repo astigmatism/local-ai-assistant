@@ -439,7 +439,7 @@ function ttsSampleText(){
 function ttsGeneratedPhrases(){
   const phrases = document.getElementById('ttsGeneratedPhrases');
   if(!phrases){ return []; }
-  return phrases.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return phrases.value.split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean);
 }
 function ttsPhraseOutputFilename(phrase){
   let normalized = (phrase || '').trim();
