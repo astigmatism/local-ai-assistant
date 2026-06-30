@@ -25,10 +25,13 @@ CONTAINER_NAME="${CONTAINER_NAME:-local-voice-assistant}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
 
-TEST_MODE="${TEST_MODE:-container}"
+TEST_MODE="${TEST_MODE:-container-mounted}"
 TEST_CMD="${TEST_CMD:-PYTHONPATH=src python -m pytest -q}"
+TEST_PATHS="${TEST_PATHS:-tests}"
+REQUIRE_TESTS="${REQUIRE_TESTS:-true}"
 CONTAINER_TEST_PACKAGES="${CONTAINER_TEST_PACKAGES:-pytest}"
-CONTAINER_TEST_SETUP_CMD="${CONTAINER_TEST_SETUP_CMD:-python -m venv --system-site-packages /tmp/local-ai-assistant-test-venv && . /tmp/local-ai-assistant-test-venv/bin/activate && python -m pip install --no-cache-dir $CONTAINER_TEST_PACKAGES}"
+CONTAINER_TEST_WORKDIR="${CONTAINER_TEST_WORKDIR:-/workspace}"
+CONTAINER_TEST_VENV="${CONTAINER_TEST_VENV:-/tmp/local-ai-assistant-test-venv}"
 
 BUILD_NO_CACHE="${BUILD_NO_CACHE:-true}"
 
@@ -60,10 +63,13 @@ Environment overrides:
   REMOTE=origin
   BRANCH=main
 
-  TEST_MODE=container|host
+  TEST_MODE=container-mounted|host|none
   TEST_CMD='PYTHONPATH=src python -m pytest -q'
+  TEST_PATHS=tests
+  REQUIRE_TESTS=true|false
   CONTAINER_TEST_PACKAGES='pytest'
-  CONTAINER_TEST_SETUP_CMD='python -m venv --system-site-packages /tmp/local-ai-assistant-test-venv && . /tmp/local-ai-assistant-test-venv/bin/activate && python -m pip install --no-cache-dir pytest'
+  CONTAINER_TEST_WORKDIR=/workspace
+  CONTAINER_TEST_VENV=/tmp/local-ai-assistant-test-venv
 
   BUILD_NO_CACHE=true|false
 
@@ -85,10 +91,12 @@ Behavior:
   3. Calculates a hash of the pulled Python source tree.
   4. Builds the Docker Compose service with Docker cache disabled by default.
   5. Verifies the freshly built image contains the pulled /app/src source and matching installed package.
-  6. Runs tests.
-     - In container mode, a temporary venv is created in the one-off test container.
-     - pytest is installed into that temporary venv by default.
-     - The production/runtime image is not modified by this test setup.
+  6. Runs tests before restart.
+     - Default mode is container-mounted.
+     - The production checkout is mounted read-only into a one-off test container.
+     - A temporary test venv is created inside that one-off container.
+     - pytest is installed into that temporary venv.
+     - The runtime image and host checkout are not modified by test setup.
   7. Recreates/restarts the app only after tests pass.
   8. Waits for the app health endpoint.
   9. Verifies the running container's /app/src source matches the pulled source.
@@ -305,30 +313,72 @@ verify_running_container_source_consistency() {
     python - < "$VERIFIER_FILE"
 }
 
+run_host_tests() {
+  bash -lc "$TEST_CMD"
+}
+
+run_container_mounted_tests() {
+  local test_setup_script
+
+  test_setup_script="$(cat <<'SH'
+set -Eeuo pipefail
+
+echo "test workdir: $(pwd)"
+echo "test command: ${TEST_CMD}"
+echo "test paths: ${TEST_PATHS}"
+
+if [[ "${REQUIRE_TESTS}" == "true" ]]; then
+  missing_paths=0
+  for path in ${TEST_PATHS}; do
+    if [[ ! -e "$path" ]]; then
+      echo "ERROR: required test path is missing in mounted checkout: $path" >&2
+      missing_paths=1
+    fi
+  done
+
+  if [[ "$missing_paths" != "0" ]]; then
+    exit 1
+  fi
+fi
+
+python -m venv --system-site-packages "${CONTAINER_TEST_VENV}"
+. "${CONTAINER_TEST_VENV}/bin/activate"
+
+python -m pip install --no-cache-dir ${CONTAINER_TEST_PACKAGES}
+
+export PYTHONPYCACHEPREFIX=/tmp/local-ai-assistant-pycache
+export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -p no:cacheprovider"
+
+sh -lc "$TEST_CMD"
+SH
+)"
+
+  docker compose run \
+    --rm \
+    --no-deps \
+    -T \
+    --entrypoint sh \
+    --workdir "$CONTAINER_TEST_WORKDIR" \
+    --volume "$ROOT_DIR:$CONTAINER_TEST_WORKDIR:ro" \
+    -e TEST_CMD="$TEST_CMD" \
+    -e TEST_PATHS="$TEST_PATHS" \
+    -e REQUIRE_TESTS="$REQUIRE_TESTS" \
+    -e CONTAINER_TEST_PACKAGES="$CONTAINER_TEST_PACKAGES" \
+    -e CONTAINER_TEST_VENV="$CONTAINER_TEST_VENV" \
+    "$SERVICE" \
+    -lc "$test_setup_script"
+}
+
 run_tests() {
   case "$TEST_MODE" in
-    container)
-      local container_test_command
-
-      if [[ -n "$CONTAINER_TEST_SETUP_CMD" ]]; then
-        container_test_command="$CONTAINER_TEST_SETUP_CMD && $TEST_CMD"
-      else
-        container_test_command="$TEST_CMD"
-      fi
-
-      echo "container test setup command: ${CONTAINER_TEST_SETUP_CMD:-none}"
-      echo "container test command: $TEST_CMD"
-
-      docker compose run \
-        --rm \
-        --no-deps \
-        -T \
-        --entrypoint sh \
-        "$SERVICE" \
-        -lc "$container_test_command"
+    container-mounted)
+      run_container_mounted_tests
       ;;
     host)
-      bash -lc "$TEST_CMD"
+      run_host_tests
+      ;;
+    none)
+      echo "test execution disabled by TEST_MODE=none"
       ;;
     *)
       fail "unsupported TEST_MODE: $TEST_MODE"
@@ -360,6 +410,8 @@ echo "container: $CONTAINER_NAME"
 echo "branch: $BRANCH"
 echo "test mode: $TEST_MODE"
 echo "test command: $TEST_CMD"
+echo "test paths: $TEST_PATHS"
+echo "require tests: $REQUIRE_TESTS"
 echo "container test packages: $CONTAINER_TEST_PACKAGES"
 echo "build no cache: $BUILD_NO_CACHE"
 echo "verify built image source: $VERIFY_BUILT_IMAGE_SOURCE"
