@@ -87,14 +87,20 @@ INDEX_HTML = """
   <title>Local Voice Assistant Admin</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.45; }
-    section.admin-panel { border: 1px solid #ddd; padding: 0; margin: 1rem 0; border-radius: 0.5rem; overflow: hidden; }
-    section.admin-panel h2 { margin: 0; }
-    .admin-panel-toggle { align-items: center; background: #fff; border: 0; cursor: pointer; display: flex; font-size: 1.25rem; font-weight: 700; justify-content: space-between; margin: 0; padding: 1rem; text-align: left; width: 100%; }
-    .admin-panel-toggle:focus { outline: 2px solid #333; outline-offset: -2px; }
-    .admin-panel-toggle:hover { background: #f6f6f6; }
+    details.admin-panel { border: 1px solid #ddd; padding: 0; margin: 1rem 0; border-radius: 0.5rem; overflow: hidden; }
+    details.admin-panel[open] { box-shadow: 0 1px 3px rgb(0 0 0 / 0.08); }
+    .admin-panel-summary { align-items: center; background: #fff; cursor: pointer; display: flex; font-size: 1.25rem; font-weight: 700; justify-content: space-between; margin: 0; padding: 1rem; text-align: left; width: 100%; }
+    .admin-panel-summary::-webkit-details-marker { display: none; }
+    .admin-panel-summary::marker { content: ""; }
+    .admin-panel-summary:focus { outline: 2px solid #333; outline-offset: -2px; }
+    .admin-panel-summary:hover { background: #f6f6f6; }
+    .admin-panel-title { align-items: center; display: inline-flex; gap: 0.45rem; }
+    .admin-panel-indicator { display: inline-block; font-size: 1rem; line-height: 1; min-width: 1.25rem; text-align: center; }
+    details.admin-panel:not([open]) .admin-panel-indicator::before { content: ">"; }
+    details.admin-panel[open] .admin-panel-indicator::before { content: "v"; }
     .admin-panel-state { font-size: 0.9rem; font-weight: 600; margin-left: 1rem; white-space: nowrap; }
     .admin-panel-body { border-top: 1px solid #ddd; box-sizing: border-box; display: flex; flex-direction: column; height: 20rem; min-height: 12rem; max-height: min(75vh, 48rem); overflow: hidden; resize: vertical; }
-    .admin-panel-body[hidden] { display: none; }
+    details.admin-panel:not([open]) .admin-panel-body { display: none; }
     .admin-panel-body-content { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 1rem; }
     .admin-panel-resize-handle { align-items: center; background: #fafafa; border-top: 1px solid #ddd; box-sizing: border-box; color: #555; cursor: ns-resize; display: flex; flex: 0 0 auto; font-size: 0.8rem; justify-content: center; letter-spacing: 0.02em; padding: 0.35rem 1rem; user-select: none; width: 100%; }
     .admin-panel-resize-handle:focus { outline: 2px solid #333; outline-offset: -2px; }
@@ -109,14 +115,12 @@ INDEX_HTML = """
 <body>
   <h1>Local Voice Assistant Admin</h1>
   <p class="warn">V1 has no authentication by requirement. Keep this service on the trusted local network only.</p>
-  <section class="admin-panel" data-admin-section="status">
-    <h2>
-      <button id="toggle-status" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-status" onclick="togglePanel(this)">
-        <span>Status</span>
-        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
-      </button>
-    </h2>
-    <div id="panel-status" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-status" hidden>
+  <details class="admin-panel" data-admin-section="status">
+    <summary id="toggle-status" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-status">
+      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Status</span></span>
+      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+    </summary>
+    <div id="panel-status" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-status" aria-hidden="true">
       <div class="admin-panel-body-content" data-panel-content>
       <button onclick="loadStatus()">Refresh status</button>
       <button onclick="simulateWake()">Simulate wake (admin-only)</button>
@@ -128,15 +132,13 @@ INDEX_HTML = """
       </div>
       <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Status section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
     </div>
-  </section>
-  <section class="admin-panel" data-admin-section="configuration">
-    <h2>
-      <button id="toggle-configuration" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-configuration" onclick="togglePanel(this)">
-        <span>Configuration</span>
-        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
-      </button>
-    </h2>
-    <div id="panel-configuration" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-configuration" hidden>
+  </details>
+  <details class="admin-panel" data-admin-section="configuration">
+    <summary id="toggle-configuration" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-configuration">
+      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Configuration</span></span>
+      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+    </summary>
+    <div id="panel-configuration" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-configuration" aria-hidden="true">
       <div class="admin-panel-body-content" data-panel-content>
       <button onclick="loadConfig()">Load config</button>
       <button onclick="saveDraft()">Save draft</button>
@@ -148,15 +150,13 @@ INDEX_HTML = """
       </div>
       <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Configuration section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
     </div>
-  </section>
-  <section class="admin-panel" data-admin-section="sound-library">
-    <h2>
-      <button id="toggle-sound-library" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-sound-library" onclick="togglePanel(this)">
-        <span>Sound Library</span>
-        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
-      </button>
-    </h2>
-    <div id="panel-sound-library" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-sound-library" hidden>
+  </details>
+  <details class="admin-panel" data-admin-section="sound-library">
+    <summary id="toggle-sound-library" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-sound-library">
+      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Sound Library</span></span>
+      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+    </summary>
+    <div id="panel-sound-library" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-sound-library" aria-hidden="true">
       <div class="admin-panel-body-content" data-panel-content>
       <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio. Set a sound event file to an empty string to intentionally disable sound for that event.</p>
       <input id="soundFile" type="file" /> <button onclick="uploadSound()">Upload</button>
@@ -165,15 +165,13 @@ INDEX_HTML = """
       </div>
       <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Sound Library section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
     </div>
-  </section>
-  <section class="admin-panel" data-admin-section="diagnostics">
-    <h2>
-      <button id="toggle-diagnostics" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-diagnostics" onclick="togglePanel(this)">
-        <span>Diagnostics</span>
-        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
-      </button>
-    </h2>
-    <div id="panel-diagnostics" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-diagnostics" hidden>
+  </details>
+  <details class="admin-panel" data-admin-section="diagnostics">
+    <summary id="toggle-diagnostics" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-diagnostics">
+      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Diagnostics</span></span>
+      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+    </summary>
+    <div id="panel-diagnostics" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-diagnostics" aria-hidden="true">
       <div class="admin-panel-body-content" data-panel-content>
       <input id="testText" value="Say this through the assistant path." size="60" />
       <button onclick="llmTtsTest()">Typed LLM/TTS test through speakerphone</button>
@@ -183,26 +181,31 @@ INDEX_HTML = """
       </div>
       <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Diagnostics section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
     </div>
-  </section>
-  <section class="admin-panel" data-admin-section="telemetry">
-    <h2>
-      <button id="toggle-telemetry" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-telemetry" onclick="togglePanel(this)">
-        <span>Telemetry</span>
-        <span class="admin-panel-state" data-panel-state aria-hidden="true">Expand +</span>
-      </button>
-    </h2>
-    <div id="panel-telemetry" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-telemetry" hidden>
+  </details>
+  <details class="admin-panel" data-admin-section="telemetry">
+    <summary id="toggle-telemetry" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-telemetry">
+      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Telemetry</span></span>
+      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+    </summary>
+    <div id="panel-telemetry" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-telemetry" aria-hidden="true">
       <div class="admin-panel-body-content" data-panel-content>
       <input id="search" placeholder="search" /> <button onclick="loadEvents()">Search history</button>
       <pre id="events"></pre>
       </div>
       <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Telemetry section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
     </div>
-  </section>
+  </details>
 <script>
 const PANEL_MIN_HEIGHT = 180;
 const PANEL_DEFAULT_HEIGHT = 320;
 const PANEL_MAX_HEIGHT = 720;
+const ADMIN_SECTION_LOADERS = {
+  status: async () => { await loadStatus(); },
+  configuration: async () => { await loadConfig(); },
+  'sound-library': async () => { await loadSounds(); },
+  diagnostics: async () => {},
+  telemetry: async () => { await loadEvents(); }
+};
 function panelMaxHeight(){ return Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_MAX_HEIGHT, Math.floor(window.innerHeight * 0.75))); }
 function clampPanelHeight(height){ return Math.min(panelMaxHeight(), Math.max(PANEL_MIN_HEIGHT, Math.round(height || PANEL_DEFAULT_HEIGHT))); }
 function updateResizeHandleValue(body){
@@ -273,6 +276,48 @@ function resizePanelFromKeyboard(event){
     setPanelHeight(body, panelMaxHeight());
   }
 }
+function reportSectionLoadError(details, error){
+  const output = details.querySelector('pre');
+  if(output){ output.textContent = 'Unable to load section data: ' + String(error); }
+}
+function updatePanelState(details){
+  const expanded = details.open;
+  const summary = details.querySelector('summary.admin-panel-summary');
+  const state = details.querySelector('[data-panel-state]');
+  const body = details.querySelector('.admin-panel-body');
+  if(summary){ summary.setAttribute('aria-expanded', String(expanded)); }
+  if(state){ state.textContent = expanded ? 'Expanded - click to collapse' : 'Collapsed - click to expand'; }
+  if(body){
+    body.setAttribute('aria-hidden', String(!expanded));
+    if(expanded){ updateResizeHandleValue(body); }
+  }
+}
+async function loadPanelDataWhenOpened(details){
+  if(!details.open || details.dataset.loaded === 'true'){ return; }
+  const loader = ADMIN_SECTION_LOADERS[details.dataset.adminSection];
+  if(!loader){
+    details.dataset.loaded = 'true';
+    return;
+  }
+  details.dataset.loaded = 'true';
+  try {
+    await loader();
+  } catch(error) {
+    details.dataset.loaded = 'false';
+    reportSectionLoadError(details, error);
+  }
+}
+function initializeAdminPanels(){
+  document.querySelectorAll('details.admin-panel').forEach((details) => {
+    details.removeAttribute('open');
+    details.dataset.loaded = 'false';
+    updatePanelState(details);
+    details.addEventListener('toggle', () => {
+      updatePanelState(details);
+      loadPanelDataWhenOpened(details);
+    });
+  });
+}
 function initializeResizablePanels(){
   document.querySelectorAll('[data-resize-handle]').forEach((handle) => {
     handle.setAttribute('aria-grabbed', 'false');
@@ -283,17 +328,6 @@ function initializeResizablePanels(){
   window.addEventListener('resize', () => {
     document.querySelectorAll('.admin-panel-body').forEach(updateResizeHandleValue);
   });
-}
-function togglePanel(button){
-  const body = document.getElementById(button.getAttribute('aria-controls'));
-  const nextExpanded = button.getAttribute('aria-expanded') !== 'true';
-  button.setAttribute('aria-expanded', String(nextExpanded));
-  if(body){ body.hidden = !nextExpanded; }
-  const section = button.closest('section.admin-panel');
-  if(section){ section.dataset.expanded = String(nextExpanded); }
-  if(nextExpanded && body){ updateResizeHandleValue(body); }
-  const state = button.querySelector('[data-panel-state]');
-  if(state){ state.textContent = nextExpanded ? 'Collapse -' : 'Expand +'; }
 }
 async function j(url, opts={}) { const r = await fetch(url, opts); const t = await r.text(); try { return JSON.parse(t); } catch { return t; } }
 async function loadStatus(){ document.getElementById('status').textContent = JSON.stringify(await j('/api/status'), null, 2); }
@@ -310,8 +344,8 @@ async function llmTtsTest(){ document.getElementById('tests').textContent = JSON
 async function micTest(){ document.getElementById('tests').textContent = JSON.stringify(await j('/api/test/microphone', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({duration_seconds:5})}), null, 2); }
 async function commandTest(){ document.getElementById('tests').textContent = JSON.stringify(await j('/api/test/command-recognition', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('commandText').value})}), null, 2); }
 async function loadEvents(){ const q = encodeURIComponent(document.getElementById('search').value); document.getElementById('events').textContent = JSON.stringify(await j('/api/telemetry/events?search='+q), null, 2); }
+initializeAdminPanels();
 initializeResizablePanels();
-loadStatus(); loadConfig(); loadEvents(); loadSounds();
 </script>
 </body>
 </html>
@@ -336,7 +370,7 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
-        return HTMLResponse(INDEX_HTML)
+        return HTMLResponse(INDEX_HTML, headers={"Cache-Control": "no-store, max-age=0"})
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -9,17 +8,21 @@ from voice_assistant.app import RuntimeBundle, create_app
 from voice_assistant.constants import EventType, SoundEvent
 
 
-ADMIN_SECTION_PATTERN = re.compile(
-    r'<section class="admin-panel" data-admin-section="(?P<key>[^"]+)">\s*'
-    r'<h2>\s*<button (?P<button_attrs>[^>]*?)>\s*(?P<button_inner>.*?)</button>\s*</h2>\s*'
+ADMIN_DETAILS_PATTERN = re.compile(
+    r'<details class="admin-panel" data-admin-section="(?P<key>[^"]+)">\s*'
+    r'<summary (?P<summary_attrs>[^>]*?)>\s*'
+    r'<span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>(?P<title>.*?)</span></span>\s*'
+    r'<span class="admin-panel-state" data-panel-state>(?P<state>.*?)</span>\s*'
+    r'</summary>\s*'
     r'<div (?P<body_attrs>[^>]*?)>\s*'
     r'<div (?P<content_attrs>[^>]*?)>\s*(?P<body>.*?)\s*</div>\s*'
     r'<span (?P<resize_attrs>[^>]*?)>(?P<resize_text>.*?)</span>\s*'
-    r'</div>\s*</section>',
+    r'</div>\s*</details>',
     re.S,
 )
 ATTR_PATTERN = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)(?:="([^"]*)")?')
 KNOWN_ADMIN_SECTION_TITLES = {"Status", "Configuration", "Sound Library", "Diagnostics", "Telemetry"}
+KNOWN_ADMIN_SECTION_KEYS = {"status", "configuration", "sound-library", "diagnostics", "telemetry"}
 
 
 def _attrs(fragment: str) -> dict[str, str]:
@@ -28,20 +31,18 @@ def _attrs(fragment: str) -> dict[str, str]:
 
 def _admin_panels(html: str) -> list[dict[str, object]]:
     panels = []
-    for match in ADMIN_SECTION_PATTERN.finditer(html):
-        title_match = re.search(r'<span>(?P<title>.*?)</span>', match.group('button_inner'), re.S)
-        assert title_match is not None
+    for match in ADMIN_DETAILS_PATTERN.finditer(html):
         panels.append(
             {
-                "key": match.group('key'),
-                "title": title_match.group('title').strip(),
-                "button_attrs": _attrs(match.group('button_attrs')),
-                "button_inner": match.group('button_inner'),
-                "body_attrs": _attrs(match.group('body_attrs')),
-                "body": match.group('body'),
-                "content_attrs": _attrs(match.group('content_attrs')),
-                "resize_attrs": _attrs(match.group('resize_attrs')),
-                "resize_text": match.group('resize_text').strip(),
+                "key": match.group("key"),
+                "title": match.group("title").strip(),
+                "state": match.group("state").strip(),
+                "summary_attrs": _attrs(match.group("summary_attrs")),
+                "body_attrs": _attrs(match.group("body_attrs")),
+                "body": match.group("body"),
+                "content_attrs": _attrs(match.group("content_attrs")),
+                "resize_attrs": _attrs(match.group("resize_attrs")),
+                "resize_text": match.group("resize_text").strip(),
             }
         )
     return panels
@@ -58,38 +59,44 @@ def test_admin_portal_and_status_need_no_auth(bundle_parts):
     client, _ = make_client(bundle_parts)
     index = client.get("/")
     assert index.status_code == 200
+    assert index.headers["cache-control"] == "no-store, max-age=0"
     assert "empty string" in index.text
     response = client.get("/api/status")
     assert response.status_code == 200
     assert "state" in response.json()
 
 
-def test_admin_portal_top_level_sections_are_collapsed_by_default(bundle_parts):
+def test_admin_portal_top_level_sections_are_collapsed_disclosures_by_default(bundle_parts):
     client, _ = make_client(bundle_parts)
     html = client.get("/").text
     panels = _admin_panels(html)
     titles = {str(panel["title"]) for panel in panels}
+    keys = {str(panel["key"]) for panel in panels}
 
     assert KNOWN_ADMIN_SECTION_TITLES <= titles
-    assert html.count('<section') == len(panels)
+    assert KNOWN_ADMIN_SECTION_KEYS <= keys
+    assert html.count('<details class="admin-panel"') == len(panels)
+    assert '<section class="admin-panel"' not in html
     for panel in panels:
-        button_attrs = panel["button_attrs"]
+        summary_attrs = panel["summary_attrs"]
         body_attrs = panel["body_attrs"]
         content_attrs = panel["content_attrs"]
         resize_attrs = panel["resize_attrs"]
-        assert isinstance(button_attrs, dict)
+        assert isinstance(summary_attrs, dict)
         assert isinstance(body_attrs, dict)
         assert isinstance(content_attrs, dict)
         assert isinstance(resize_attrs, dict)
-        assert button_attrs["type"] == "button"
-        assert button_attrs["aria-expanded"] == "false"
-        assert button_attrs["onclick"] == "togglePanel(this)"
-        assert button_attrs["aria-controls"] == body_attrs["id"]
+        assert "open" not in summary_attrs
+        assert summary_attrs["role"] == "button"
+        assert summary_attrs["aria-expanded"] == "false"
+        assert summary_attrs["aria-controls"] == body_attrs["id"]
+        assert "admin-panel-summary" in summary_attrs["class"].split()
         assert "admin-panel-body" in body_attrs["class"].split()
         assert "data-resizable-panel" in body_attrs
         assert body_attrs["role"] == "region"
-        assert body_attrs["aria-labelledby"] == button_attrs["id"]
-        assert "hidden" in body_attrs
+        assert body_attrs["aria-labelledby"] == summary_attrs["id"]
+        assert body_attrs["aria-hidden"] == "true"
+        assert panel["state"] == "Collapsed - click to expand"
         assert "admin-panel-body-content" in content_attrs["class"].split()
         assert "data-panel-content" in content_attrs
         assert "admin-panel-resize-handle" in resize_attrs["class"].split()
@@ -130,7 +137,7 @@ def test_admin_portal_sections_are_resizable_scrollable_panels(bundle_parts):
     assert "overflow: hidden" in html
     assert ".admin-panel-body-content" in html
     assert "overflow: auto" in html
-    assert ".admin-panel-body[hidden] { display: none; }" in html
+    assert "details.admin-panel:not([open]) .admin-panel-body { display: none; }" in html
 
     assert len(panels) == html.count('class="admin-panel-resize-handle" data-resize-handle')
     for panel in panels:
@@ -142,17 +149,31 @@ def test_admin_portal_sections_are_resizable_scrollable_panels(bundle_parts):
         assert "Drag or use arrow keys to resize" == panel["resize_text"]
 
 
-def test_admin_portal_toggle_reveals_and_hides_without_replacing_form_state(bundle_parts):
+def test_admin_portal_opens_lazily_and_does_not_auto_load_heavy_runtime_content(bundle_parts):
     client, _ = make_client(bundle_parts)
     html = client.get("/").text
 
-    assert "function togglePanel(button)" in html
-    assert "const nextExpanded = button.getAttribute('aria-expanded') !== 'true';" in html
-    assert "button.setAttribute('aria-expanded', String(nextExpanded));" in html
-    assert "body.hidden = !nextExpanded;" in html
-    assert "section.dataset.expanded = String(nextExpanded);" in html
-    assert "if(nextExpanded && body){ updateResizeHandleValue(body); }" in html
-    assert "state.textContent = nextExpanded ? 'Collapse -' : 'Expand +';" in html
+    assert "const ADMIN_SECTION_LOADERS" in html
+    assert "details.addEventListener('toggle'" in html
+    assert "loadPanelDataWhenOpened(details);" in html
+    assert "details.removeAttribute('open');" in html
+    assert "details.dataset.loaded = 'false';" in html
+    assert "if(!details.open || details.dataset.loaded === 'true'){ return; }" in html
+    assert "initializeAdminPanels();\ninitializeResizablePanels();" in html
+    assert "initializeResizablePanels();\nloadStatus();" not in html
+    assert "loadStatus(); loadConfig(); loadEvents(); loadSounds();" not in html
+
+
+def test_admin_portal_toggle_updates_state_without_replacing_form_state(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+
+    assert "function updatePanelState(details)" in html
+    assert "const expanded = details.open;" in html
+    assert "summary.setAttribute('aria-expanded', String(expanded));" in html
+    assert "body.setAttribute('aria-hidden', String(!expanded));" in html
+    assert "state.textContent = expanded ? 'Expanded - click to collapse' : 'Collapsed - click to expand';" in html
+    assert "details.dataset.loaded === 'true'" in html
     assert ".innerHTML" not in html
 
     config_panel = next(panel for panel in _admin_panels(html) if panel["title"] == "Configuration")
@@ -181,20 +202,22 @@ def test_admin_portal_resize_handle_supports_keyboard_adjustment(bundle_parts):
     assert "handle.addEventListener('keydown', resizePanelFromKeyboard);" in html
     assert "event.key === 'ArrowDown'" in html
     assert "event.key === 'ArrowUp'" in html
+    assert "event.key === 'PageDown'" in html
+    assert "event.key === 'PageUp'" in html
     assert "event.key === 'Home'" in html
     assert "event.key === 'End'" in html
 
 
-def test_admin_portal_collapsible_controls_are_keyboard_accessible_buttons(bundle_parts):
+def test_admin_portal_collapsible_controls_are_keyboard_accessible_disclosures(bundle_parts):
     client, _ = make_client(bundle_parts)
     for panel in _admin_panels(client.get("/").text):
-        button_attrs = panel["button_attrs"]
-        assert isinstance(button_attrs, dict)
-        assert button_attrs["type"] == "button"
-        assert "admin-panel-toggle" in button_attrs["class"].split()
-        assert button_attrs["aria-expanded"] in {"false", "true"}
-        assert "data-panel-state" in str(panel["button_inner"])
-
+        summary_attrs = panel["summary_attrs"]
+        assert isinstance(summary_attrs, dict)
+        assert summary_attrs["role"] == "button"
+        assert "admin-panel-summary" in summary_attrs["class"].split()
+        assert summary_attrs["aria-expanded"] in {"false", "true"}
+        assert summary_attrs["aria-controls"] == panel["body_attrs"]["id"]
+        assert panel["state"] in {"Collapsed - click to expand", "Expanded - click to collapse"}
 
 def test_config_draft_apply_export_import_and_restart_pending(bundle_parts):
     client, (store, telemetry, *_rest) = make_client(bundle_parts)
