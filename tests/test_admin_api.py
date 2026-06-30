@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from voice_assistant.app import RuntimeBundle, create_app
-from voice_assistant.constants import EventType
+from voice_assistant.constants import EventType, SoundEvent
 
 
 def make_client(bundle_parts):
@@ -17,7 +17,9 @@ def make_client(bundle_parts):
 
 def test_admin_portal_and_status_need_no_auth(bundle_parts):
     client, _ = make_client(bundle_parts)
-    assert client.get("/").status_code == 200
+    index = client.get("/")
+    assert index.status_code == 200
+    assert "empty string" in index.text
     response = client.get("/api/status")
     assert response.status_code == 200
     assert "state" in response.json()
@@ -40,6 +42,22 @@ def test_config_draft_apply_export_import_and_restart_pending(bundle_parts):
     assert client.post("/api/config/import", json=exported).status_code == 200
 
 
+def test_config_export_import_preserves_empty_sound_event_file(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    saved = client.get("/api/config").json()["saved"]
+    saved["sounds"]["event_files"][SoundEvent.PROMPT_ACCEPTED.value] = ""
+
+    applied = client.post("/api/config/apply", json={"config": saved})
+
+    assert applied.status_code == 200
+    assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.PROMPT_ACCEPTED.value] == ""
+    exported = client.get("/api/config/export").json()
+    assert exported["sounds"]["event_files"][SoundEvent.PROMPT_ACCEPTED.value] == ""
+    imported = client.post("/api/config/import", json=exported)
+    assert imported.status_code == 200
+    assert imported.json()["draft"]["sounds"]["event_files"][SoundEvent.PROMPT_ACCEPTED.value] == ""
+
+
 def test_sound_upload_list_play_delete(bundle_parts, tmp_path):
     client, (store, telemetry, runtime, audio, *_rest) = make_client(bundle_parts)
     sound = tmp_path / "custom.wav"
@@ -47,7 +65,9 @@ def test_sound_upload_list_play_delete(bundle_parts, tmp_path):
     with sound.open("rb") as handle:
         response = client.post("/api/sounds", files={"file": ("custom.wav", handle, "audio/wav")})
     assert response.status_code == 200
-    assert "custom.wav" in client.get("/api/sounds").json()["files"]
+    sounds_payload = client.get("/api/sounds").json()
+    assert "custom.wav" in sounds_payload["files"]
+    assert "empty string" in sounds_payload["format_guidance"]
     assert client.post("/api/sounds/custom.wav/play").status_code == 200
     assert client.delete("/api/sounds/custom.wav").status_code == 200
     assert "custom.wav" not in client.get("/api/sounds").json()["files"]

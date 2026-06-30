@@ -83,9 +83,11 @@ class AudioController:
         )
         await proc.communicate()
 
-    def resolve_sound_path(self, cfg: AssistantConfig, event: SoundEvent | str) -> Path:
+    def resolve_sound_path(self, cfg: AssistantConfig, event: SoundEvent | str) -> Path | None:
         event_key = SoundEvent(event)
         filename = cfg.sounds.event_files[event_key]
+        if filename == "":
+            return None
         path = Path(filename)
         if not path.is_absolute():
             path = Path(cfg.sounds.library_dir) / path
@@ -100,6 +102,8 @@ class AudioController:
         serialize: bool = True,
     ) -> None:
         path = self.resolve_sound_path(cfg, event)
+        if path is None:
+            return
         if serialize:
             async with self._effect_lock:
                 await self.play_file(cfg, path, cancel_event=cancel_event)
@@ -151,8 +155,14 @@ class AudioController:
 
     def start_looping_sound(self, cfg: AssistantConfig, event: SoundEvent | str) -> LoopingSoundHandle:
         stop_event = asyncio.Event()
-        task = asyncio.create_task(self._loop_sound(cfg, event, stop_event))
+        if self.resolve_sound_path(cfg, event) is None:
+            task = asyncio.create_task(self._no_sound_loop())
+        else:
+            task = asyncio.create_task(self._loop_sound(cfg, event, stop_event))
         return LoopingSoundHandle(stop_event=stop_event, task=task)
+
+    async def _no_sound_loop(self) -> None:
+        return
 
     async def _loop_sound(self, cfg: AssistantConfig, event: SoundEvent | str, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():

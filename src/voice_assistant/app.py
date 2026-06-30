@@ -119,7 +119,7 @@ INDEX_HTML = """
   </section>
   <section>
     <h2>Sound library</h2>
-    <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio.</p>
+    <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio. Set a sound event file to an empty string to intentionally disable sound for that event.</p>
     <input id="soundFile" type="file" /> <button onclick="uploadSound()">Upload</button>
     <button onclick="loadSounds()">List sounds</button>
     <pre id="sounds"></pre>
@@ -336,7 +336,7 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
             "sound_directory": str(sound_dir),
             "files": files,
             "event_files": {str(k): v for k, v in cfg.sounds.event_files.items()},
-            "format_guidance": "Use WAV files, preferably simple/uncompressed PCM WAV. Test playback after upload.",
+            "format_guidance": "Use WAV files, preferably simple/uncompressed PCM WAV. Set an event file to an empty string to disable sound for that event. Test playback after upload.",
         }
 
     @app.post("/api/sounds")
