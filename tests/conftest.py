@@ -120,41 +120,120 @@ class FakeAudio:
 
 
 class FakeSTT:
-    def __init__(self, outputs: list[str] | None = None, exc: BaseException | None = None):
+    def __init__(
+        self,
+        outputs: list[str] | None = None,
+        exc: BaseException | None = None,
+        trace: list[tuple[str, Any]] | None = None,
+    ):
         self.outputs = outputs or ["hello assistant"]
         self.exc = exc
         self.calls: list[str] = []
+        self.trace = trace
+        self.block_calls = 0
+        self.started = asyncio.Event()
+        self.allow_finish = asyncio.Event()
+        self.cancelled = False
 
     async def transcribe(self, wav_path):
         self.calls.append(str(wav_path))
+        if self.trace is not None:
+            self.trace.append(("stt_start", str(wav_path)))
+        self.started.set()
+        if self.block_calls > 0:
+            self.block_calls -= 1
+            try:
+                while not self.allow_finish.is_set():
+                    await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                if self.trace is not None:
+                    self.trace.append(("stt_cancelled", str(wav_path)))
+                raise
         if self.exc:
+            if self.trace is not None:
+                self.trace.append(("stt_error", str(self.exc)))
             raise self.exc
-        return self.outputs.pop(0) if self.outputs else ""
+        transcript = self.outputs.pop(0) if self.outputs else ""
+        if self.trace is not None:
+            self.trace.append(("stt_end", transcript))
+        return transcript
 
 
 class FakeLLM:
-    def __init__(self, outputs: list[str] | None = None, exc: BaseException | None = None):
+    def __init__(
+        self,
+        outputs: list[str] | None = None,
+        exc: BaseException | None = None,
+        trace: list[tuple[str, Any]] | None = None,
+    ):
         self.outputs = outputs or ["hello human"]
         self.exc = exc
         self.messages: list[list[dict[str, str]]] = []
+        self.trace = trace
+        self.block_calls = 0
+        self.started = asyncio.Event()
+        self.allow_finish = asyncio.Event()
+        self.cancelled = False
 
     async def chat(self, messages):
         self.messages.append(messages)
+        if self.trace is not None:
+            self.trace.append(("llm_start", len(messages)))
+        self.started.set()
+        if self.block_calls > 0:
+            self.block_calls -= 1
+            try:
+                while not self.allow_finish.is_set():
+                    await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                if self.trace is not None:
+                    self.trace.append(("llm_cancelled", len(messages)))
+                raise
         if self.exc:
+            if self.trace is not None:
+                self.trace.append(("llm_error", str(self.exc)))
             raise self.exc
-        return self.outputs.pop(0) if self.outputs else "ok"
+        output = self.outputs.pop(0) if self.outputs else "ok"
+        if self.trace is not None:
+            self.trace.append(("llm_end", output))
+        return output
 
 
 class FakeTTS:
-    def __init__(self, exc: BaseException | None = None):
+    def __init__(self, exc: BaseException | None = None, trace: list[tuple[str, Any]] | None = None):
         self.exc = exc
         self.inputs: list[str] = []
+        self.trace = trace
+        self.block_calls = 0
+        self.started = asyncio.Event()
+        self.allow_finish = asyncio.Event()
+        self.cancelled = False
 
     async def synthesize(self, text, output_path):
         self.inputs.append(text)
+        if self.trace is not None:
+            self.trace.append(("tts_start", text))
+        self.started.set()
+        if self.block_calls > 0:
+            self.block_calls -= 1
+            try:
+                while not self.allow_finish.is_set():
+                    await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                if self.trace is not None:
+                    self.trace.append(("tts_cancelled", text))
+                raise
         if self.exc:
+            if self.trace is not None:
+                self.trace.append(("tts_error", str(self.exc)))
             raise self.exc
-        return write_wav(output_path)
+        path = write_wav(output_path)
+        if self.trace is not None:
+            self.trace.append(("tts_end", str(path)))
+        return path
 
 
 @pytest.fixture
@@ -174,9 +253,9 @@ def bundle_parts(tmp_path, monkeypatch):
     store.apply_config(cfg)
     telemetry = TelemetryStore(cfg["storage"]["telemetry_db_path"], cfg["storage"]["artifacts_dir"])
     audio = FakeAudio(tmp_path)
-    stt = FakeSTT()
-    llm = FakeLLM()
-    tts = FakeTTS()
+    stt = FakeSTT(trace=audio.calls)
+    llm = FakeLLM(trace=audio.calls)
+    tts = FakeTTS(trace=audio.calls)
     runtime = AssistantRuntime(
         store,
         telemetry,

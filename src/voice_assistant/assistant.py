@@ -492,6 +492,13 @@ class AssistantRuntime:
     async def _process_prompt(self, capture: CaptureResult, cfg: AssistantConfig, interaction_id: str, conversation_id: str) -> None:
         cancel_event = self._active_cancel_event or asyncio.Event()
         thinking: LoopingSoundHandle | None = None
+
+        async def stop_processing_feedback() -> None:
+            nonlocal thinking
+            if thinking:
+                await thinking.stop()
+                thinking = None
+
         try:
             self.state.set_state(RuntimeState.PROCESSING_STT, interaction_id=interaction_id, conversation_id=conversation_id)
             self.telemetry.log_event(EventType.STT_STARTED, "STT request started.", state=RuntimeState.PROCESSING_STT.value, conversation_id=conversation_id, interaction_id=interaction_id, component="stt")
@@ -500,9 +507,7 @@ class AssistantRuntime:
             transcript = await self.stt_factory(cfg).transcribe(capture.path)
             stt_duration_ms = (time.monotonic() - started) * 1000
             if not transcript:
-                if thinking:
-                    await thinking.stop()
-                    thinking = None
+                await stop_processing_feedback()
                 self.telemetry.log_event(
                     EventType.STT_RESULT,
                     "STT returned no text; prompt is invalid.",
@@ -528,9 +533,6 @@ class AssistantRuntime:
                 duration_ms=stt_duration_ms,
                 data={"transcript": transcript},
             )
-            if thinking:
-                await thinking.stop()
-                thinking = None
             self.telemetry.log_event(
                 EventType.PROMPT_ACCEPTED,
                 "Prompt accepted because STT returned text.",
@@ -539,13 +541,15 @@ class AssistantRuntime:
                 interaction_id=interaction_id,
                 component="stt",
                 success=True,
+                data={
+                    "sound_event": SoundEvent.PROMPT_ACCEPTED.value,
+                    "sound_playback": "suppressed_during_processing_feedback",
+                },
             )
-            await self.audio.play_sound_event(cfg, SoundEvent.PROMPT_ACCEPTED, cancel_event=cancel_event)
 
             self.conversation.add_user(transcript)
             self.state.set_state(RuntimeState.PROCESSING_LLM, interaction_id=interaction_id, conversation_id=conversation_id)
             self.telemetry.log_event(EventType.LLM_STARTED, "LLM request started.", state=RuntimeState.PROCESSING_LLM.value, conversation_id=conversation_id, interaction_id=interaction_id, component="llm")
-            thinking = self.audio.start_looping_sound(cfg, SoundEvent.THINKING)
             started = time.monotonic()
             llm_text = await self.llm_factory(cfg).chat(self.conversation.messages_for_llm())
             llm_duration_ms = (time.monotonic() - started) * 1000
@@ -596,9 +600,7 @@ class AssistantRuntime:
                     data={"artifact_id": artifact.id, "artifact_kind": artifact.kind},
                 )
 
-            if thinking:
-                await thinking.stop()
-                thinking = None
+            await stop_processing_feedback()
             self.state.set_state(RuntimeState.PLAYING_RESPONSE, interaction_id=interaction_id, conversation_id=conversation_id)
             self.telemetry.log_event(EventType.PLAYBACK_STARTED, "Response playback started.", state=RuntimeState.PLAYING_RESPONSE.value, conversation_id=conversation_id, interaction_id=interaction_id, component="audio")
             started = time.monotonic()
@@ -617,24 +619,19 @@ class AssistantRuntime:
             )
             self.state.set_state(RuntimeState.IDLE, interaction_id=interaction_id, conversation_id=conversation_id)
         except asyncio.CancelledError:
-            if thinking:
-                await thinking.stop()
+            await stop_processing_feedback()
             raise
         except ServiceAuthError as exc:
-            if thinking:
-                await thinking.stop()
+            await stop_processing_feedback()
             await self._handle_failure(cfg, interaction_id=interaction_id, conversation_id=conversation_id, event_type=EventType.FAILURE, sound_event=SoundEvent.NETWORK_FAILURE, component="auth", message="Service authentication failure.", error=exc)
         except NetworkServiceError as exc:
-            if thinking:
-                await thinking.stop()
+            await stop_processing_feedback()
             await self._handle_failure(cfg, interaction_id=interaction_id, conversation_id=conversation_id, event_type=EventType.FAILURE, sound_event=SoundEvent.NETWORK_FAILURE, component="network", message="Network/service failure.", error=exc)
         except MalformedServiceResponse as exc:
-            if thinking:
-                await thinking.stop()
+            await stop_processing_feedback()
             await self._handle_failure(cfg, interaction_id=interaction_id, conversation_id=conversation_id, event_type=EventType.FAILURE, sound_event=SoundEvent.INTERNAL_FAILURE, component="service", message="Malformed downstream service response.", error=exc)
         except ServiceError as exc:
-            if thinking:
-                await thinking.stop()
+            await stop_processing_feedback()
             component = "service"
             sound = SoundEvent.INTERNAL_FAILURE
             text = str(exc).lower()
@@ -645,6 +642,9 @@ class AssistantRuntime:
             elif "tts" in text:
                 component, sound = "tts", SoundEvent.TTS_FAILURE
             await self._handle_failure(cfg, interaction_id=interaction_id, conversation_id=conversation_id, event_type=EventType.FAILURE, sound_event=sound, component=component, message=f"{component.upper()} failure.", error=exc)
+        except Exception:
+            await stop_processing_feedback()
+            raise
 
     async def _handle_failure(
         self,
