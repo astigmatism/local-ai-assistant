@@ -1,0 +1,49 @@
+# Requirements Traceability Matrix
+
+This matrix maps the V1 design requirements to implementation artifacts and automated tests. Requirement IDs are grouped by the section numbers from the design handoff.
+
+| Requirement area | Implementation artifacts | Automated coverage |
+|---|---|---|
+| 3-4 Product summary and V1 scope: wake, acknowledgement, capture, local command gate, STT, LLM, TTS, conversation, barge-in, telemetry, admin portal | `assistant.py`, `wake.py`, `audio.py`, `commands.py`, `clients.py`, `conversation.py`, `telemetry.py`, `app.py` | `test_runtime_flows.py::test_normal_prompt_flow_stt_llm_tts_playback_and_context`, `test_admin_api.py::test_admin_portal_and_status_need_no_auth` |
+| 5 Non-goals: no physical controls, no smart home, no timers, no help/repeat, no voice restart/reboot, no reset-to-defaults, no auth | No voice-command registry entries beyond v1 intents; no reset endpoint; no auth dependencies | `test_config_and_clients.py::test_default_configuration_matches_design_inventory`, `test_commands_and_conversation.py::test_command_aliases_and_disabled_state` |
+| 7.1 Local wake-word detection, not main STT | `wake.py` local engine adapters; STT client is only called after command gate | `test_runtime_flows.py::test_cancel_command_is_local_and_preserves_context` asserts command path bypasses STT |
+| 7.3 and 17 local status feedback uses sound effects, not local spoken phrases | `constants.py::SoundEvent`, `audio.py`, config sound event map | `test_config_and_clients.py::test_default_configuration_matches_design_inventory`, runtime tests assert sound events |
+| 7.4 Configurable behavior | `config.py`, admin config endpoints | `test_config_and_clients.py`, `test_admin_api.py::test_config_draft_apply_export_import_and_restart_pending` |
+| 7.5 and 10 Local command gate before main STT and whole-utterance matching | `commands.py`, `assistant.py::_recognize_command_safely` | `test_commands_and_conversation.py::test_command_matching_uses_whole_utterance_not_substrings`, `test_runtime_flows.py::test_cancel_command_is_local_and_preserves_context` |
+| 8 Wake availability and state-dependent behavior | `AssistantRuntime.on_wake_detected`, `wake.py` | `test_runtime_flows.py::test_barge_in_during_playback_cancels_and_starts_new_capture`, `test_runtime_flows.py::test_wake_during_prompt_capture_is_not_valid_new_wake` |
+| 8.3 One active v1 wake phrase, future multiple phrase support | `WakeConfig.wake_phrases`, `WakeConfig.active_wake_phrase` | `test_config_and_clients.py::test_default_configuration_matches_design_inventory` |
+| 8.4-8.6 Wake acknowledgement and barge-in | `assistant.py::_interaction_flow`, `audio.py::play_sound_event`, cancellation logic | `test_runtime_flows.py::test_normal_prompt_flow_stt_llm_tts_playback_and_context`, `test_runtime_flows.py::test_barge_in_during_playback_cancels_and_starts_new_capture` |
+| 9 Prompt capture starts with wake sound; ends by silence or max; min/default 3s; max/default 120s; silence configurable | `audio.py::record_prompt`, `PromptCaptureConfig` | `test_config_and_clients.py::test_default_configuration_matches_design_inventory`, `test_runtime_flows.py::test_normal_prompt_flow_stt_llm_tts_playback_and_context` |
+| 10 Command registry, multiple aliases, enabled state, performance-constrained local recognizer | `CommandRegistryConfig`, `CommandRegistry`, optional `VoskCommandRecognizer` | `test_commands_and_conversation.py::test_command_aliases_and_disabled_state` |
+| 10.7 V1 commands only cancel/stop and new conversation | Default command config only includes two intents | `test_config_and_clients.py::test_default_configuration_matches_design_inventory` |
+| 11 Cancel/stop behavior: cancel active, idle, preserve context, interrupt playback after wake | `assistant.py::_handle_command`, barge-in cancellation | `test_runtime_flows.py::test_cancel_command_is_local_and_preserves_context`, `test_runtime_flows.py::test_barge_in_during_playback_cancels_and_starts_new_capture` |
+| 12 New conversation behavior: acknowledge, clear context, immediately capture next prompt without wake | `assistant.py::_handle_command` recursively calls capture pipeline without wake sound | `test_runtime_flows.py::test_new_conversation_command_clears_context_and_immediately_captures_next_prompt` |
+| 13 Prompt validity based on STT result | `assistant.py::_process_prompt` | `test_runtime_flows.py::test_invalid_prompt_when_stt_returns_no_text`, normal prompt test |
+| 14 Active processing sequence STT -> LLM -> TTS -> playback | `assistant.py::_process_prompt`, `clients.py` | `test_runtime_flows.py::test_normal_prompt_flow_stt_llm_tts_playback_and_context` |
+| 14.3 Thinking sound loops during processing and stops before playback | `audio.py::start_looping_sound`, `assistant.py::_process_prompt` | `test_runtime_flows.py::test_normal_prompt_flow_stt_llm_tts_playback_and_context`, failure test |
+| 14.4 and 27 Failure handling for STT/LLM/TTS/network/internal | `assistant.py::_handle_failure`, client exceptions | `test_runtime_flows.py::test_invalid_prompt_when_stt_returns_no_text`, `test_runtime_flows.py::test_llm_failure_stops_thinking_plays_failure_and_preserves_context` |
+| 15 Barge-in during processing/playback | `AssistantRuntime.on_wake_detected`, `_cancel_current` | `test_runtime_flows.py::test_barge_in_during_playback_cancels_and_starts_new_capture` |
+| 16 Conversation continuity, wake required for every prompt, timeout, no history limit, no summarization | `ConversationManager` | `test_commands_and_conversation.py::test_conversation_preserves_context_until_timeout_and_does_not_truncate`, runtime normal/new tests |
+| 17 Sound events independently configurable; WAV guidance | `SoundConfig`, `assets/sounds`, sound admin endpoints | `test_config_and_clients.py::test_default_configuration_matches_design_inventory`, `test_admin_api.py::test_sound_upload_list_play_delete` |
+| 18 Privacy: no pre-wake audio stored/sent | Wake engines process local audio only; telemetry/artifacts created only after prompt capture | Covered by architecture; no pre-wake artifact paths exist in code. Runtime tests create artifacts only from post-wake capture. |
+| 19 Telemetry and artifacts, retention, cleanup | `telemetry.py`, scheduled cleanup in `assistant.py`, manual cleanup in `maintenance.py` | `test_admin_api.py::test_telemetry_search_and_live_history_endpoint`, `test_admin_api.py::test_microphone_test_records_artifact_when_enabled`, maintenance test |
+| 20 Admin portal no auth, grouped apply, active vs pending restart values, import/export, no reset | `app.py` config endpoints and HTML portal | `test_admin_api.py::test_admin_portal_and_status_need_no_auth`, `test_admin_api.py::test_config_draft_apply_export_import_and_restart_pending` |
+| 21 Admin config coverage | `AssistantConfig` includes wake, capture, conversation, sounds, commands, telemetry, services, audio | `test_config_and_clients.py::test_default_configuration_matches_design_inventory`, config API tests |
+| 22 Sound management | `/api/sounds`, `/api/sound-events/{event}/play` | `test_admin_api.py::test_sound_upload_list_play_delete` |
+| 23 Telemetry views, filtering/search, artifact access | `/api/telemetry/events`, `/api/telemetry/live`, `/api/artifacts` | `test_admin_api.py::test_telemetry_search_and_live_history_endpoint`, `test_admin_api.py::test_microphone_test_records_artifact_when_enabled` |
+| 24 Runtime status and component health | `/api/status`, `/api/health`, `health.py` | `test_admin_api.py::test_admin_portal_and_status_need_no_auth` plus health implementation |
+| 25 Test/debug tools: LLM/TTS typed test, microphone test, wake debug, command recognition test | `/api/test/*` | `test_admin_api.py::test_microphone_test_records_artifact_when_enabled`, `test_admin_api.py::test_command_recognition_admin_test_uses_whole_utterance` |
+| 26 Maintenance/restart/reboot controls with confirmation and startup support | `maintenance.py`, `deploy/systemd.service`, Docker restart policy | `test_admin_api.py::test_maintenance_requires_confirmation_and_is_safe_by_default` |
+| Home-network integration handoff: Whisper, Kokoro, Ollama router `/api/chat` no model, EMEET ALSA device | `STTServiceConfig`, `LLMServiceConfig`, `TTSServiceConfig`, `AudioDeviceConfig`, `clients.py` | `test_config_and_clients.py::test_llm_client_never_sends_model_field` |
+
+## Manual validation still required on the physical thin client
+
+Automated tests use fake audio and fake services so they can run without `/dev/snd` or LAN dependencies. Before production use, validate these on the thin client:
+
+1. EMEET microphone capture through `arecord`.
+2. EMEET speaker playback through `aplay`.
+3. Mixer volume enforcement through `amixer -c 0 sset PCM 100% unmute`.
+4. Selected production wake engine model or external wake process.
+5. Optional Vosk command recognizer model path if using local command audio recognition.
+6. Whisper, Ollama router, and Kokoro service reachability with real keys.
+7. Admin portal availability only on the trusted LAN.

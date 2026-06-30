@@ -1,0 +1,22 @@
+services:
+  voice-assistant:
+    build:
+      context: .
+      args:
+        # Set these to true if you want the image to include the optional local engines.
+        INSTALL_WAKE_EXTRAS: "false"
+        INSTALL_COMMAND_VOSK: "false"
+    container_name: local-voice-assistant
+    network_mode: host
+    restart: unless-stopped
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+    environment:
+      VOICE_ASSISTANT_CONFIG: /app/data/config.json
+      WHISPER_API_KEY: ${WHISPER_API_KEY:?set in .env}
+      TTS_ROUTER_API_KEY: ${TTS_ROUTER_API_KEY:?set in .env}
+    volumes:
+      - ./data:/app/data
+      - ./assets/sounds:/app/assets/sounds
