@@ -29,7 +29,7 @@ TEST_MODE="${TEST_MODE:-container-mounted}"
 TEST_CMD="${TEST_CMD:-PYTHONPATH=src python -m pytest -q}"
 TEST_PATHS="${TEST_PATHS:-tests}"
 REQUIRE_TESTS="${REQUIRE_TESTS:-true}"
-CONTAINER_TEST_PACKAGES="${CONTAINER_TEST_PACKAGES:-pytest}"
+CONTAINER_TEST_PACKAGES="${CONTAINER_TEST_PACKAGES:-pytest pytest-asyncio}"
 CONTAINER_TEST_WORKDIR="${CONTAINER_TEST_WORKDIR:-/workspace}"
 CONTAINER_TEST_VENV="${CONTAINER_TEST_VENV:-/tmp/local-ai-assistant-test-venv}"
 
@@ -67,7 +67,7 @@ Environment overrides:
   TEST_CMD='PYTHONPATH=src python -m pytest -q'
   TEST_PATHS=tests
   REQUIRE_TESTS=true|false
-  CONTAINER_TEST_PACKAGES='pytest'
+  CONTAINER_TEST_PACKAGES='pytest pytest-asyncio'
   CONTAINER_TEST_WORKDIR=/workspace
   CONTAINER_TEST_VENV=/tmp/local-ai-assistant-test-venv
 
@@ -95,7 +95,7 @@ Behavior:
      - Default mode is container-mounted.
      - The production checkout is mounted read-only into a one-off test container.
      - A temporary test venv is created inside that one-off container.
-     - pytest is installed into that temporary venv.
+     - pytest and pytest-asyncio are installed into that temporary venv.
      - The runtime image and host checkout are not modified by test setup.
   7. Recreates/restarts the app only after tests pass.
   8. Waits for the app health endpoint.
@@ -321,35 +321,47 @@ run_container_mounted_tests() {
   local test_setup_script
 
   test_setup_script="$(cat <<'SH'
-set -Eeuo pipefail
+set -eu
 
 echo "test workdir: $(pwd)"
 echo "test command: ${TEST_CMD}"
 echo "test paths: ${TEST_PATHS}"
+echo "test packages: ${CONTAINER_TEST_PACKAGES}"
+echo "test venv: ${CONTAINER_TEST_VENV}"
 
-if [[ "${REQUIRE_TESTS}" == "true" ]]; then
+if [ "${REQUIRE_TESTS}" = "true" ]; then
   missing_paths=0
   for path in ${TEST_PATHS}; do
-    if [[ ! -e "$path" ]]; then
+    if [ ! -e "$path" ]; then
       echo "ERROR: required test path is missing in mounted checkout: $path" >&2
       missing_paths=1
     fi
   done
 
-  if [[ "$missing_paths" != "0" ]]; then
+  if [ "$missing_paths" != "0" ]; then
     exit 1
   fi
 fi
 
+rm -rf "${CONTAINER_TEST_VENV}"
 python -m venv --system-site-packages "${CONTAINER_TEST_VENV}"
-. "${CONTAINER_TEST_VENV}/bin/activate"
 
-python -m pip install --no-cache-dir ${CONTAINER_TEST_PACKAGES}
+"${CONTAINER_TEST_VENV}/bin/python" -m pip install --no-cache-dir ${CONTAINER_TEST_PACKAGES}
+"${CONTAINER_TEST_VENV}/bin/python" -m pytest --version
 
+export PATH="${CONTAINER_TEST_VENV}/bin:${PATH}"
 export PYTHONPYCACHEPREFIX=/tmp/local-ai-assistant-pycache
 export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -p no:cacheprovider"
 
-sh -lc "$TEST_CMD"
+echo "python used for tests: $(command -v python)"
+python - <<'PY'
+import pytest
+import sys
+print("pytest module:", pytest.__file__)
+print("python executable:", sys.executable)
+PY
+
+sh -c "$TEST_CMD"
 SH
 )"
 
@@ -366,7 +378,7 @@ SH
     -e CONTAINER_TEST_PACKAGES="$CONTAINER_TEST_PACKAGES" \
     -e CONTAINER_TEST_VENV="$CONTAINER_TEST_VENV" \
     "$SERVICE" \
-    -lc "$test_setup_script"
+    -c "$test_setup_script"
 }
 
 run_tests() {
