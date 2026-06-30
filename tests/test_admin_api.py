@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -8,44 +9,70 @@ from voice_assistant.app import RuntimeBundle, create_app
 from voice_assistant.constants import EventType, SoundEvent
 
 
-ADMIN_DETAILS_PATTERN = re.compile(
-    r'<details class="admin-panel" data-admin-section="(?P<key>[^"]+)">\s*'
-    r'<summary (?P<summary_attrs>[^>]*?)>\s*'
-    r'<span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>(?P<title>.*?)</span></span>\s*'
-    r'<span class="admin-panel-state" data-panel-state>(?P<state>.*?)</span>\s*'
-    r'</summary>\s*'
-    r'<div (?P<body_attrs>[^>]*?)>\s*'
-    r'<div (?P<content_attrs>[^>]*?)>\s*(?P<body>.*?)\s*</div>\s*'
-    r'<span (?P<resize_attrs>[^>]*?)>(?P<resize_text>.*?)</span>\s*'
-    r'</div>\s*</details>',
-    re.S,
-)
+SECTION_START_PATTERN = re.compile(r'<section\s+(?P<attrs>[^>]*data-admin-section="(?P<key>[^"]+)"[^>]*)>', re.S)
 ATTR_PATTERN = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)(?:="([^"]*)")?')
 KNOWN_ADMIN_SECTION_TITLES = {"Status", "Configuration", "Sound Library", "Diagnostics", "Telemetry"}
-KNOWN_ADMIN_SECTION_KEYS = {"status", "configuration", "sound-library", "diagnostics", "telemetry"}
+LAZY_LOADERS = {
+    "status": "loadStatus",
+    "configuration": "loadConfig",
+    "sound-library": "loadSounds",
+    "telemetry": "loadEvents",
+}
 
 
 def _attrs(fragment: str) -> dict[str, str]:
     return {name: value for name, value in ATTR_PATTERN.findall(fragment)}
 
 
+def _class_names(attrs: dict[str, str]) -> set[str]:
+    return set(attrs.get("class", "").split())
+
+
+def _first_tag_attrs(fragment: str, tag: str, *, element_id: str | None = None, class_name: str | None = None) -> dict[str, str]:
+    for match in re.finditer(rf'<{tag}\s+(?P<attrs>[^>]*)>', fragment, re.S):
+        attrs = _attrs(match.group("attrs"))
+        if element_id is not None and attrs.get("id") != element_id:
+            continue
+        if class_name is not None and class_name not in _class_names(attrs):
+            continue
+        return attrs
+    raise AssertionError(f"Could not find <{tag}> in admin panel fragment")
+
+
+def _section_fragments(html: str) -> list[tuple[str, dict[str, str], str]]:
+    matches = list(SECTION_START_PATTERN.finditer(html))
+    fragments: list[tuple[str, dict[str, str], str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else html.index("<script>", match.end())
+        fragments.append((match.group("key"), _attrs(match.group("attrs")), html[match.start() : end]))
+    return fragments
+
+
 def _admin_panels(html: str) -> list[dict[str, object]]:
-    panels = []
-    for match in ADMIN_DETAILS_PATTERN.finditer(html):
+    panels: list[dict[str, object]] = []
+    for key, section_attrs, fragment in _section_fragments(html):
+        title_match = re.search(r'<span class="admin-panel-title">(?P<title>.*?)</span>', fragment, re.S)
+        assert title_match is not None
         panels.append(
             {
-                "key": match.group("key"),
-                "title": match.group("title").strip(),
-                "state": match.group("state").strip(),
-                "summary_attrs": _attrs(match.group("summary_attrs")),
-                "body_attrs": _attrs(match.group("body_attrs")),
-                "body": match.group("body"),
-                "content_attrs": _attrs(match.group("content_attrs")),
-                "resize_attrs": _attrs(match.group("resize_attrs")),
-                "resize_text": match.group("resize_text").strip(),
+                "key": key,
+                "title": title_match.group("title").strip(),
+                "section_attrs": section_attrs,
+                "button_attrs": _first_tag_attrs(fragment, "button", element_id=f"toggle-{key}"),
+                "body_attrs": _first_tag_attrs(fragment, "div", element_id=f"panel-{key}"),
+                "handle_attrs": _first_tag_attrs(fragment, "div", class_name="admin-panel-resize-handle"),
+                "fragment": fragment,
             }
         )
     return panels
+
+
+def _style_block(html: str) -> str:
+    return html.split("<style>", 1)[1].split("</style>", 1)[0]
+
+
+def _script_block(html: str) -> str:
+    return html.split("<script>", 1)[1].split("</script>", 1)[0]
 
 
 def make_client(bundle_parts):
@@ -66,50 +93,38 @@ def test_admin_portal_and_status_need_no_auth(bundle_parts):
     assert "state" in response.json()
 
 
-def test_admin_portal_top_level_sections_are_collapsed_disclosures_by_default(bundle_parts):
+def test_admin_portal_top_level_sections_are_collapsed_by_default(bundle_parts):
     client, _ = make_client(bundle_parts)
     html = client.get("/").text
     panels = _admin_panels(html)
     titles = {str(panel["title"]) for panel in panels}
-    keys = {str(panel["key"]) for panel in panels}
 
     assert KNOWN_ADMIN_SECTION_TITLES <= titles
-    assert KNOWN_ADMIN_SECTION_KEYS <= keys
-    assert html.count('<details class="admin-panel"') == len(panels)
-    assert '<section class="admin-panel"' not in html
+    assert html.count('<section class="admin-panel') == len(panels)
     for panel in panels:
-        summary_attrs = panel["summary_attrs"]
+        section_attrs = panel["section_attrs"]
+        button_attrs = panel["button_attrs"]
         body_attrs = panel["body_attrs"]
-        content_attrs = panel["content_attrs"]
-        resize_attrs = panel["resize_attrs"]
-        assert isinstance(summary_attrs, dict)
+        assert isinstance(section_attrs, dict)
+        assert isinstance(button_attrs, dict)
         assert isinstance(body_attrs, dict)
-        assert isinstance(content_attrs, dict)
-        assert isinstance(resize_attrs, dict)
-        assert "open" not in summary_attrs
-        assert summary_attrs["role"] == "button"
-        assert summary_attrs["aria-expanded"] == "false"
-        assert summary_attrs["aria-controls"] == body_attrs["id"]
-        assert "admin-panel-summary" in summary_attrs["class"].split()
-        assert "admin-panel-body" in body_attrs["class"].split()
-        assert "data-resizable-panel" in body_attrs
+        assert "admin-panel" in _class_names(section_attrs)
+        assert "is-collapsed" in _class_names(section_attrs)
+        assert "is-expanded" not in _class_names(section_attrs)
+        assert button_attrs["type"] == "button"
+        assert button_attrs["aria-expanded"] == "false"
+        assert button_attrs["onclick"] == "togglePanel(this)"
+        assert button_attrs["aria-controls"] == body_attrs["id"]
         assert body_attrs["role"] == "region"
-        assert body_attrs["aria-labelledby"] == summary_attrs["id"]
+        assert body_attrs["aria-labelledby"] == button_attrs["id"]
         assert body_attrs["aria-hidden"] == "true"
-        assert panel["state"] == "Collapsed - click to expand"
-        assert "admin-panel-body-content" in content_attrs["class"].split()
-        assert "data-panel-content" in content_attrs
-        assert "admin-panel-resize-handle" in resize_attrs["class"].split()
-        assert "data-resize-handle" in resize_attrs
-        assert resize_attrs["role"] == "separator"
-        assert resize_attrs["aria-orientation"] == "horizontal"
-        assert resize_attrs["tabindex"] == "0"
-        assert panel["title"] in resize_attrs["aria-label"]
+        assert "hidden" in body_attrs
+        assert "Collapsed - click to expand" in str(panel["fragment"])
 
 
 def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundle_parts):
     client, _ = make_client(bundle_parts)
-    panels = {str(panel["title"]): str(panel["body"]) for panel in _admin_panels(client.get("/").text)}
+    panels = {str(panel["title"]): str(panel["fragment"]) for panel in _admin_panels(client.get("/").text)}
 
     expected_content = {
         "Status": ['id="status"', 'id="health"', 'loadWakeDebug()'],
@@ -124,100 +139,132 @@ def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundl
             assert token in panels[title]
 
 
-def test_admin_portal_sections_are_resizable_scrollable_panels(bundle_parts):
+def test_admin_portal_runtime_content_is_not_loaded_until_panel_expands(bundle_parts):
     client, _ = make_client(bundle_parts)
     html = client.get("/").text
-    panels = _admin_panels(html)
+    script = _script_block(html)
+    initializer = script.split("function initializeAdminPortal(){", 1)[1].split("}\nif(document.readyState", 1)[0]
+    panels = {str(panel["key"]): panel for panel in _admin_panels(html)}
 
-    assert ".admin-panel-body" in html
-    assert "height: 20rem" in html
-    assert "min-height: 12rem" in html
-    assert "max-height: min(75vh, 48rem)" in html
-    assert "resize: vertical" in html
-    assert "overflow: hidden" in html
-    assert ".admin-panel-body-content" in html
-    assert "overflow: auto" in html
-    assert "details.admin-panel:not([open]) .admin-panel-body { display: none; }" in html
-
-    assert len(panels) == html.count('class="admin-panel-resize-handle" data-resize-handle')
-    for panel in panels:
-        resize_attrs = panel["resize_attrs"]
-        assert isinstance(resize_attrs, dict)
-        assert resize_attrs["aria-valuemin"] == "180"
-        assert resize_attrs["aria-valuemax"] == "720"
-        assert resize_attrs["aria-valuenow"] == "320"
-        assert "Drag or use arrow keys to resize" == panel["resize_text"]
+    assert "loadStatus(); loadConfig(); loadEvents(); loadSounds();" not in script
+    assert "loadStatus();" not in initializer
+    assert "loadConfig();" not in initializer
+    assert "loadEvents();" not in initializer
+    assert "loadSounds();" not in initializer
+    assert "loadPanelOnFirstExpand(section, body);" in script
+    assert "body.dataset.loaded = 'true';" in script
+    for key, loader in LAZY_LOADERS.items():
+        body_attrs = panels[key]["body_attrs"]
+        assert isinstance(body_attrs, dict)
+        assert body_attrs["data-load-on-expand"] == loader
+    diagnostics_attrs = panels["diagnostics"]["body_attrs"]
+    assert isinstance(diagnostics_attrs, dict)
+    assert "data-load-on-expand" not in diagnostics_attrs
 
 
-def test_admin_portal_opens_lazily_and_does_not_auto_load_heavy_runtime_content(bundle_parts):
+def test_admin_portal_collapsed_layout_hides_runtime_populated_targets(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+    style = _style_block(html)
+    script = _script_block(html)
+    status_panel = next(panel for panel in _admin_panels(html) if panel["title"] == "Status")
+
+    assert "[hidden] { display: none !important; }" in style
+    assert "section.admin-panel.is-collapsed > .admin-panel-body" in style
+    assert ".admin-panel-body[hidden]" in style
+    assert "display: none !important" in style
+    assert "height: 0 !important" in style
+    assert "overflow: hidden !important" in style
+    assert "visibility: hidden !important" in style
+    assert "section.admin-panel.is-collapsed [data-runtime-output]" in style
+    assert 'id="panel-status"' in str(status_panel["fragment"])
+    assert 'id="status" data-runtime-output' in str(status_panel["fragment"])
+    assert str(status_panel["fragment"]).index('id="panel-status"') < str(status_panel["fragment"]).index('id="status"')
+    assert "function keepCollapsedPanelHidden(target)" in script
+    assert "function writeText(id, value)" in script
+    assert "target.textContent = value;" in script
+    assert "if(!section || !section.classList.contains('is-collapsed')){ return; }" in script
+    assert "section.querySelector('[data-resizable-panel]')" in script
+    assert "body.hidden = true;" in script
+    assert "body.setAttribute('aria-hidden', 'true');" in script
+    assert "async function loadStatus(){ writeJson('status', await j('/api/status')); }" in script
+    assert "document.getElementById('status').textContent" not in script
+
+
+def test_admin_portal_toggle_reveals_and_hides_without_replacing_form_state(bundle_parts):
     client, _ = make_client(bundle_parts)
     html = client.get("/").text
 
-    assert "const ADMIN_SECTION_LOADERS" in html
-    assert "details.addEventListener('toggle'" in html
-    assert "loadPanelDataWhenOpened(details);" in html
-    assert "details.removeAttribute('open');" in html
-    assert "details.dataset.loaded = 'false';" in html
-    assert "if(!details.open || details.dataset.loaded === 'true'){ return; }" in html
-    assert "initializeAdminPanels();\ninitializeResizablePanels();" in html
-    assert "initializeResizablePanels();\nloadStatus();" not in html
-    assert "loadStatus(); loadConfig(); loadEvents(); loadSounds();" not in html
-
-
-def test_admin_portal_toggle_updates_state_without_replacing_form_state(bundle_parts):
-    client, _ = make_client(bundle_parts)
-    html = client.get("/").text
-
-    assert "function updatePanelState(details)" in html
-    assert "const expanded = details.open;" in html
-    assert "summary.setAttribute('aria-expanded', String(expanded));" in html
+    assert "function togglePanel(button)" in html
+    assert "function setPanelExpanded(button, expanded)" in html
+    assert "const nextExpanded = button.getAttribute('aria-expanded') !== 'true';" in html
+    assert "button.setAttribute('aria-expanded', String(expanded));" in html
+    assert "body.hidden = !expanded;" in html
     assert "body.setAttribute('aria-hidden', String(!expanded));" in html
+    assert "section.classList.toggle('is-collapsed', !expanded);" in html
     assert "state.textContent = expanded ? 'Expanded - click to collapse' : 'Collapsed - click to expand';" in html
-    assert "details.dataset.loaded === 'true'" in html
+    assert "loadPanelOnFirstExpand(section, body);" in html
     assert ".innerHTML" not in html
+    assert "removeChild" not in html
 
     config_panel = next(panel for panel in _admin_panels(html) if panel["title"] == "Configuration")
-    assert 'textarea id="config"' in str(config_panel["body"])
-    assert 'onclick="applyDraft()"' in str(config_panel["body"])
+    assert 'textarea id="config"' in str(config_panel["fragment"])
+    assert 'onclick="applyDraft()"' in str(config_panel["fragment"])
 
 
-def test_admin_portal_resize_script_changes_only_the_target_panel_height(bundle_parts):
-    client, _ = make_client(bundle_parts)
-    html = client.get("/").text
-
-    assert "function setPanelHeight(body, height)" in html
-    assert "body.style.height = clampPanelHeight(height) + 'px';" in html
-    assert "function beginPanelResize(event)" in html
-    assert "const body = handle.closest('.admin-panel-body');" in html
-    assert "setPanelHeight(body, startHeight + moveEvent.clientY - startY);" in html
-    assert "document.addEventListener('pointermove', resizePanel);" in html
-    assert "document.removeEventListener('pointermove', resizePanel);" in html
-    assert "initializeResizablePanels();" in html
-
-
-def test_admin_portal_resize_handle_supports_keyboard_adjustment(bundle_parts):
-    client, _ = make_client(bundle_parts)
-    html = client.get("/").text
-
-    assert "handle.addEventListener('keydown', resizePanelFromKeyboard);" in html
-    assert "event.key === 'ArrowDown'" in html
-    assert "event.key === 'ArrowUp'" in html
-    assert "event.key === 'PageDown'" in html
-    assert "event.key === 'PageUp'" in html
-    assert "event.key === 'Home'" in html
-    assert "event.key === 'End'" in html
-
-
-def test_admin_portal_collapsible_controls_are_keyboard_accessible_disclosures(bundle_parts):
+def test_admin_portal_collapsible_controls_are_keyboard_accessible_buttons(bundle_parts):
     client, _ = make_client(bundle_parts)
     for panel in _admin_panels(client.get("/").text):
-        summary_attrs = panel["summary_attrs"]
-        assert isinstance(summary_attrs, dict)
-        assert summary_attrs["role"] == "button"
-        assert "admin-panel-summary" in summary_attrs["class"].split()
-        assert summary_attrs["aria-expanded"] in {"false", "true"}
-        assert summary_attrs["aria-controls"] == panel["body_attrs"]["id"]
-        assert panel["state"] in {"Collapsed - click to expand", "Expanded - click to collapse"}
+        button_attrs = panel["button_attrs"]
+        assert isinstance(button_attrs, dict)
+        assert button_attrs["type"] == "button"
+        assert "admin-panel-toggle" in _class_names(button_attrs)
+        assert button_attrs["aria-expanded"] in {"false", "true"}
+        assert "data-panel-state" in str(panel["fragment"])
+        assert "data-panel-marker" in str(panel["fragment"])
+
+
+def test_admin_portal_all_sections_are_resizable_scroll_panels(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+    style = _style_block(html)
+
+    assert ".admin-panel-body-content" in style
+    assert "overflow: auto" in style
+    assert "max-height: min(75vh, 45rem)" in style
+    for panel in _admin_panels(html):
+        body_attrs = panel["body_attrs"]
+        handle_attrs = panel["handle_attrs"]
+        fragment = str(panel["fragment"])
+        assert isinstance(body_attrs, dict)
+        assert isinstance(handle_attrs, dict)
+        assert "admin-panel-body" in _class_names(body_attrs)
+        assert "data-resizable-panel" in body_attrs
+        assert "data-panel-content" in fragment
+        assert "admin-panel-resize-handle" in _class_names(handle_attrs)
+        assert "data-resize-handle" in handle_attrs
+        assert handle_attrs["role"] == "separator"
+        assert handle_attrs["aria-orientation"] == "horizontal"
+        assert handle_attrs["tabindex"] == "0"
+        assert handle_attrs["aria-valuemin"] == "192"
+        assert handle_attrs["aria-valuemax"] == "720"
+        assert handle_attrs["aria-valuenow"] == "320"
+
+
+def test_admin_portal_resize_pointer_and_keyboard_wiring(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    html = client.get("/").text
+
+    assert "function beginPanelResize(event)" in html
+    assert "function resizePanelFromKeyboard(event)" in html
+    assert "handle.addEventListener('pointerdown', beginPanelResize);" in html
+    assert "handle.addEventListener('keydown', resizePanelFromKeyboard);" in html
+    assert "document.addEventListener('pointermove', resizePanel);" in html
+    assert "document.addEventListener('pointerup', finishResize);" in html
+    assert "setPanelHeight(body, startHeight + moveEvent.clientY - startY);" in html
+    for key in ["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End"]:
+        assert key in html
+
 
 def test_config_draft_apply_export_import_and_restart_pending(bundle_parts):
     client, (store, telemetry, *_rest) = make_client(bundle_parts)

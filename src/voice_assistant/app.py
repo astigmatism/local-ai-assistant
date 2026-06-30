@@ -86,21 +86,20 @@ INDEX_HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Local Voice Assistant Admin</title>
   <style>
+    [hidden] { display: none !important; }
     body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.45; }
-    details.admin-panel { border: 1px solid #ddd; padding: 0; margin: 1rem 0; border-radius: 0.5rem; overflow: hidden; }
-    details.admin-panel[open] { box-shadow: 0 1px 3px rgb(0 0 0 / 0.08); }
-    .admin-panel-summary { align-items: center; background: #fff; cursor: pointer; display: flex; font-size: 1.25rem; font-weight: 700; justify-content: space-between; margin: 0; padding: 1rem; text-align: left; width: 100%; }
-    .admin-panel-summary::-webkit-details-marker { display: none; }
-    .admin-panel-summary::marker { content: ""; }
-    .admin-panel-summary:focus { outline: 2px solid #333; outline-offset: -2px; }
-    .admin-panel-summary:hover { background: #f6f6f6; }
-    .admin-panel-title { align-items: center; display: inline-flex; gap: 0.45rem; }
-    .admin-panel-indicator { display: inline-block; font-size: 1rem; line-height: 1; min-width: 1.25rem; text-align: center; }
-    details.admin-panel:not([open]) .admin-panel-indicator::before { content: ">"; }
-    details.admin-panel[open] .admin-panel-indicator::before { content: "v"; }
+    section.admin-panel { background: #fff; border: 1px solid #ddd; margin: 1rem 0; border-radius: 0.5rem; overflow: hidden; padding: 0; }
+    section.admin-panel h2 { margin: 0; }
+    .admin-panel-toggle { align-items: center; background: #f7f7f7; border: 0; cursor: pointer; display: flex; font-size: 1.25rem; font-weight: 700; gap: 0.75rem; justify-content: space-between; margin: 0; padding: 1rem; text-align: left; width: 100%; }
+    .admin-panel-toggle:focus { outline: 2px solid #333; outline-offset: -2px; }
+    .admin-panel-toggle:hover { background: #f0f0f0; }
+    .admin-panel-marker { align-items: center; border: 1px solid #bbb; border-radius: 999px; display: inline-flex; flex: 0 0 auto; height: 1.5rem; justify-content: center; width: 1.5rem; }
+    .admin-panel-title { flex: 1 1 auto; }
     .admin-panel-state { font-size: 0.9rem; font-weight: 600; margin-left: 1rem; white-space: nowrap; }
-    .admin-panel-body { border-top: 1px solid #ddd; box-sizing: border-box; display: flex; flex-direction: column; height: 20rem; min-height: 12rem; max-height: min(75vh, 48rem); overflow: hidden; resize: vertical; }
-    details.admin-panel:not([open]) .admin-panel-body { display: none; }
+    .admin-panel-body { border-top: 1px solid #ddd; box-sizing: border-box; display: flex; flex-direction: column; height: 20rem; min-height: 12rem; max-height: min(75vh, 45rem); overflow: hidden; padding: 0; }
+    section.admin-panel.is-collapsed > .admin-panel-body,
+    section.admin-panel > .admin-panel-body[hidden] { border: 0 !important; display: none !important; height: 0 !important; max-height: 0 !important; min-height: 0 !important; overflow: hidden !important; padding: 0 !important; visibility: hidden !important; }
+    section.admin-panel.is-collapsed [data-runtime-output] { margin: 0 !important; max-height: 0 !important; overflow: hidden !important; padding: 0 !important; }
     .admin-panel-body-content { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 1rem; }
     .admin-panel-resize-handle { align-items: center; background: #fafafa; border-top: 1px solid #ddd; box-sizing: border-box; color: #555; cursor: ns-resize; display: flex; flex: 0 0 auto; font-size: 0.8rem; justify-content: center; letter-spacing: 0.02em; padding: 0.35rem 1rem; user-select: none; width: 100%; }
     .admin-panel-resize-handle:focus { outline: 2px solid #333; outline-offset: -2px; }
@@ -115,103 +114,115 @@ INDEX_HTML = """
 <body>
   <h1>Local Voice Assistant Admin</h1>
   <p class="warn">V1 has no authentication by requirement. Keep this service on the trusted local network only.</p>
-  <details class="admin-panel" data-admin-section="status">
-    <summary id="toggle-status" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-status">
-      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Status</span></span>
-      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
-    </summary>
-    <div id="panel-status" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-status" aria-hidden="true">
-      <div class="admin-panel-body-content" data-panel-content>
-      <button onclick="loadStatus()">Refresh status</button>
-      <button onclick="simulateWake()">Simulate wake (admin-only)</button>
-      <button onclick="loadHealth()">Refresh health</button>
-      <button onclick="loadWakeDebug()">Wake debug</button>
-      <button onclick="migrateProductionWake()">Migrate saved config to production wake</button>
-      <pre id="status"></pre>
-      <pre id="health"></pre>
+  <section class="admin-panel is-collapsed" data-admin-section="status">
+    <h2>
+      <button id="toggle-status" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-status" onclick="togglePanel(this)">
+        <span class="admin-panel-marker" data-panel-marker aria-hidden="true">+</span>
+        <span class="admin-panel-title">Status</span>
+        <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+      </button>
+    </h2>
+    <div id="panel-status" class="admin-panel-body" data-resizable-panel data-load-on-expand="loadStatus" role="region" aria-labelledby="toggle-status" aria-hidden="true" hidden>
+      <div id="panel-status-content" class="admin-panel-body-content" data-panel-content>
+        <button onclick="loadStatus()">Refresh status</button>
+        <button onclick="simulateWake()">Simulate wake (admin-only)</button>
+        <button onclick="loadHealth()">Refresh health</button>
+        <button onclick="loadWakeDebug()">Wake debug</button>
+        <button onclick="migrateProductionWake()">Migrate saved config to production wake</button>
+        <pre id="status" data-runtime-output></pre>
+        <pre id="health" data-runtime-output></pre>
       </div>
-      <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Status section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
+      <div class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-controls="panel-status-content" aria-label="Resize Status section height" aria-valuemin="192" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</div>
     </div>
-  </details>
-  <details class="admin-panel" data-admin-section="configuration">
-    <summary id="toggle-configuration" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-configuration">
-      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Configuration</span></span>
-      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
-    </summary>
-    <div id="panel-configuration" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-configuration" aria-hidden="true">
-      <div class="admin-panel-body-content" data-panel-content>
-      <button onclick="loadConfig()">Load config</button>
-      <button onclick="saveDraft()">Save draft</button>
-      <button onclick="applyDraft()">Apply saved draft</button>
-      <a href="/api/config/export" download="voice-assistant-config.json">Export saved config</a>
-      <p>Edits are applied as a group. STT/LLM/TTS connection changes are saved as pending-restart values.</p>
-      <textarea id="config"></textarea>
-      <pre id="configResult"></pre>
+  </section>
+  <section class="admin-panel is-collapsed" data-admin-section="configuration">
+    <h2>
+      <button id="toggle-configuration" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-configuration" onclick="togglePanel(this)">
+        <span class="admin-panel-marker" data-panel-marker aria-hidden="true">+</span>
+        <span class="admin-panel-title">Configuration</span>
+        <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+      </button>
+    </h2>
+    <div id="panel-configuration" class="admin-panel-body" data-resizable-panel data-load-on-expand="loadConfig" role="region" aria-labelledby="toggle-configuration" aria-hidden="true" hidden>
+      <div id="panel-configuration-content" class="admin-panel-body-content" data-panel-content>
+        <button onclick="loadConfig()">Load config</button>
+        <button onclick="saveDraft()">Save draft</button>
+        <button onclick="applyDraft()">Apply saved draft</button>
+        <a href="/api/config/export" download="voice-assistant-config.json">Export saved config</a>
+        <p>Edits are applied as a group. STT/LLM/TTS connection changes are saved as pending-restart values.</p>
+        <textarea id="config"></textarea>
+        <pre id="configResult" data-runtime-output></pre>
       </div>
-      <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Configuration section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
+      <div class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-controls="panel-configuration-content" aria-label="Resize Configuration section height" aria-valuemin="192" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</div>
     </div>
-  </details>
-  <details class="admin-panel" data-admin-section="sound-library">
-    <summary id="toggle-sound-library" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-sound-library">
-      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Sound Library</span></span>
-      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
-    </summary>
-    <div id="panel-sound-library" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-sound-library" aria-hidden="true">
-      <div class="admin-panel-body-content" data-panel-content>
-      <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio. Set a sound event file to an empty string to intentionally disable sound for that event.</p>
-      <input id="soundFile" type="file" /> <button onclick="uploadSound()">Upload</button>
-      <button onclick="loadSounds()">List sounds</button>
-      <pre id="sounds"></pre>
+  </section>
+  <section class="admin-panel is-collapsed" data-admin-section="sound-library">
+    <h2>
+      <button id="toggle-sound-library" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-sound-library" onclick="togglePanel(this)">
+        <span class="admin-panel-marker" data-panel-marker aria-hidden="true">+</span>
+        <span class="admin-panel-title">Sound Library</span>
+        <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+      </button>
+    </h2>
+    <div id="panel-sound-library" class="admin-panel-body" data-resizable-panel data-load-on-expand="loadSounds" role="region" aria-labelledby="toggle-sound-library" aria-hidden="true" hidden>
+      <div id="panel-sound-library-content" class="admin-panel-body-content" data-panel-content>
+        <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio. Set a sound event file to an empty string to intentionally disable sound for that event.</p>
+        <input id="soundFile" type="file" /> <button onclick="uploadSound()">Upload</button>
+        <button onclick="loadSounds()">List sounds</button>
+        <pre id="sounds" data-runtime-output></pre>
       </div>
-      <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Sound Library section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
+      <div class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-controls="panel-sound-library-content" aria-label="Resize Sound Library section height" aria-valuemin="192" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</div>
     </div>
-  </details>
-  <details class="admin-panel" data-admin-section="diagnostics">
-    <summary id="toggle-diagnostics" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-diagnostics">
-      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Diagnostics</span></span>
-      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
-    </summary>
-    <div id="panel-diagnostics" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-diagnostics" aria-hidden="true">
-      <div class="admin-panel-body-content" data-panel-content>
-      <input id="testText" value="Say this through the assistant path." size="60" />
-      <button onclick="llmTtsTest()">Typed LLM/TTS test through speakerphone</button>
-      <button onclick="micTest()">5s microphone test</button>
-      <input id="commandText" value="stop" /> <button onclick="commandTest()">Local command test</button>
-      <pre id="tests"></pre>
+  </section>
+  <section class="admin-panel is-collapsed" data-admin-section="diagnostics">
+    <h2>
+      <button id="toggle-diagnostics" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-diagnostics" onclick="togglePanel(this)">
+        <span class="admin-panel-marker" data-panel-marker aria-hidden="true">+</span>
+        <span class="admin-panel-title">Diagnostics</span>
+        <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+      </button>
+    </h2>
+    <div id="panel-diagnostics" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-diagnostics" aria-hidden="true" hidden>
+      <div id="panel-diagnostics-content" class="admin-panel-body-content" data-panel-content>
+        <input id="testText" value="Say this through the assistant path." size="60" />
+        <button onclick="llmTtsTest()">Typed LLM/TTS test through speakerphone</button>
+        <button onclick="micTest()">5s microphone test</button>
+        <input id="commandText" value="stop" /> <button onclick="commandTest()">Local command test</button>
+        <pre id="tests" data-runtime-output></pre>
       </div>
-      <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Diagnostics section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
+      <div class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-controls="panel-diagnostics-content" aria-label="Resize Diagnostics section height" aria-valuemin="192" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</div>
     </div>
-  </details>
-  <details class="admin-panel" data-admin-section="telemetry">
-    <summary id="toggle-telemetry" class="admin-panel-summary" role="button" aria-expanded="false" aria-controls="panel-telemetry">
-      <span class="admin-panel-title"><span class="admin-panel-indicator" aria-hidden="true"></span><span>Telemetry</span></span>
-      <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
-    </summary>
-    <div id="panel-telemetry" class="admin-panel-body" data-resizable-panel role="region" aria-labelledby="toggle-telemetry" aria-hidden="true">
-      <div class="admin-panel-body-content" data-panel-content>
-      <input id="search" placeholder="search" /> <button onclick="loadEvents()">Search history</button>
-      <pre id="events"></pre>
+  </section>
+  <section class="admin-panel is-collapsed" data-admin-section="telemetry">
+    <h2>
+      <button id="toggle-telemetry" class="admin-panel-toggle" type="button" aria-expanded="false" aria-controls="panel-telemetry" onclick="togglePanel(this)">
+        <span class="admin-panel-marker" data-panel-marker aria-hidden="true">+</span>
+        <span class="admin-panel-title">Telemetry</span>
+        <span class="admin-panel-state" data-panel-state>Collapsed - click to expand</span>
+      </button>
+    </h2>
+    <div id="panel-telemetry" class="admin-panel-body" data-resizable-panel data-load-on-expand="loadEvents" role="region" aria-labelledby="toggle-telemetry" aria-hidden="true" hidden>
+      <div id="panel-telemetry-content" class="admin-panel-body-content" data-panel-content>
+        <input id="search" placeholder="search" /> <button onclick="loadEvents()">Search history</button>
+        <pre id="events" data-runtime-output></pre>
       </div>
-      <span class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-label="Resize Telemetry section height" aria-valuemin="180" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</span>
+      <div class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-controls="panel-telemetry-content" aria-label="Resize Telemetry section height" aria-valuemin="192" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</div>
     </div>
-  </details>
+  </section>
 <script>
-const PANEL_MIN_HEIGHT = 180;
+const PANEL_MIN_HEIGHT = 192;
 const PANEL_DEFAULT_HEIGHT = 320;
 const PANEL_MAX_HEIGHT = 720;
-const ADMIN_SECTION_LOADERS = {
-  status: async () => { await loadStatus(); },
-  configuration: async () => { await loadConfig(); },
-  'sound-library': async () => { await loadSounds(); },
-  diagnostics: async () => {},
-  telemetry: async () => { await loadEvents(); }
-};
-function panelMaxHeight(){ return Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_MAX_HEIGHT, Math.floor(window.innerHeight * 0.75))); }
+function panelMaxHeight(){
+  const viewportHeight = window.innerHeight || PANEL_MAX_HEIGHT;
+  return Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_MAX_HEIGHT, Math.floor(viewportHeight * 0.75)));
+}
 function clampPanelHeight(height){ return Math.min(panelMaxHeight(), Math.max(PANEL_MIN_HEIGHT, Math.round(height || PANEL_DEFAULT_HEIGHT))); }
+function currentPanelHeight(body){ return body.getBoundingClientRect().height || parseInt(body.style.height, 10) || PANEL_DEFAULT_HEIGHT; }
 function updateResizeHandleValue(body){
   const handle = body ? body.querySelector('[data-resize-handle]') : null;
   if(!handle){ return; }
-  const currentHeight = body.getBoundingClientRect().height || parseInt(body.style.height, 10) || PANEL_DEFAULT_HEIGHT;
+  const currentHeight = currentPanelHeight(body);
   handle.setAttribute('aria-valuemin', String(PANEL_MIN_HEIGHT));
   handle.setAttribute('aria-valuemax', String(panelMaxHeight()));
   handle.setAttribute('aria-valuenow', String(clampPanelHeight(currentHeight)));
@@ -221,12 +232,11 @@ function setPanelHeight(body, height){
   body.style.height = clampPanelHeight(height) + 'px';
   updateResizeHandleValue(body);
 }
-function currentPanelHeight(body){ return body.getBoundingClientRect().height || parseInt(body.style.height, 10) || PANEL_DEFAULT_HEIGHT; }
 function beginPanelResize(event){
   if(event.button !== undefined && event.button !== 0){ return; }
   const handle = event.currentTarget;
-  const body = handle.closest('.admin-panel-body');
-  if(!body){ return; }
+  const body = handle.closest('[data-resizable-panel]');
+  if(!body || body.hidden){ return; }
   event.preventDefault();
   const startY = event.clientY;
   const startHeight = currentPanelHeight(body);
@@ -252,8 +262,8 @@ function beginPanelResize(event){
   document.addEventListener('pointercancel', finishResize);
 }
 function resizePanelFromKeyboard(event){
-  const body = event.currentTarget.closest('.admin-panel-body');
-  if(!body){ return; }
+  const body = event.currentTarget.closest('[data-resizable-panel]');
+  if(!body || body.hidden){ return; }
   const current = currentPanelHeight(body);
   const step = event.shiftKey ? 80 : 32;
   if(event.key === 'ArrowDown'){
@@ -276,76 +286,96 @@ function resizePanelFromKeyboard(event){
     setPanelHeight(body, panelMaxHeight());
   }
 }
-function reportSectionLoadError(details, error){
-  const output = details.querySelector('pre');
-  if(output){ output.textContent = 'Unable to load section data: ' + String(error); }
-}
-function updatePanelState(details){
-  const expanded = details.open;
-  const summary = details.querySelector('summary.admin-panel-summary');
-  const state = details.querySelector('[data-panel-state]');
-  const body = details.querySelector('.admin-panel-body');
-  if(summary){ summary.setAttribute('aria-expanded', String(expanded)); }
-  if(state){ state.textContent = expanded ? 'Expanded - click to collapse' : 'Collapsed - click to expand'; }
-  if(body){
-    body.setAttribute('aria-hidden', String(!expanded));
-    if(expanded){ updateResizeHandleValue(body); }
-  }
-}
-async function loadPanelDataWhenOpened(details){
-  if(!details.open || details.dataset.loaded === 'true'){ return; }
-  const loader = ADMIN_SECTION_LOADERS[details.dataset.adminSection];
-  if(!loader){
-    details.dataset.loaded = 'true';
-    return;
-  }
-  details.dataset.loaded = 'true';
-  try {
-    await loader();
-  } catch(error) {
-    details.dataset.loaded = 'false';
-    reportSectionLoadError(details, error);
-  }
-}
-function initializeAdminPanels(){
-  document.querySelectorAll('details.admin-panel').forEach((details) => {
-    details.removeAttribute('open');
-    details.dataset.loaded = 'false';
-    updatePanelState(details);
-    details.addEventListener('toggle', () => {
-      updatePanelState(details);
-      loadPanelDataWhenOpened(details);
-    });
-  });
-}
 function initializeResizablePanels(){
   document.querySelectorAll('[data-resize-handle]').forEach((handle) => {
+    if(handle.dataset.resizeBound === 'true'){ return; }
+    handle.dataset.resizeBound = 'true';
     handle.setAttribute('aria-grabbed', 'false');
     handle.addEventListener('pointerdown', beginPanelResize);
     handle.addEventListener('keydown', resizePanelFromKeyboard);
-    updateResizeHandleValue(handle.closest('.admin-panel-body'));
+    updateResizeHandleValue(handle.closest('[data-resizable-panel]'));
   });
   window.addEventListener('resize', () => {
-    document.querySelectorAll('.admin-panel-body').forEach(updateResizeHandleValue);
+    document.querySelectorAll('[data-resizable-panel]').forEach(updateResizeHandleValue);
   });
 }
+function loadPanelOnFirstExpand(section, body){
+  const loaderName = body ? body.dataset.loadOnExpand : '';
+  if(!loaderName || body.dataset.loaded === 'true'){ return; }
+  const loader = window[loaderName];
+  if(typeof loader !== 'function'){ return; }
+  body.dataset.loaded = 'true';
+  Promise.resolve(loader()).catch((err) => {
+    body.dataset.loaded = 'false';
+    console.error(err);
+  });
+}
+function setPanelExpanded(button, expanded){
+  const body = document.getElementById(button.getAttribute('aria-controls'));
+  const section = button.closest('section.admin-panel');
+  button.setAttribute('aria-expanded', String(expanded));
+  if(body){
+    body.hidden = !expanded;
+    body.setAttribute('aria-hidden', String(!expanded));
+  }
+  if(section){
+    section.classList.toggle('is-expanded', expanded);
+    section.classList.toggle('is-collapsed', !expanded);
+  }
+  const state = button.querySelector('[data-panel-state]');
+  if(state){ state.textContent = expanded ? 'Expanded - click to collapse' : 'Collapsed - click to expand'; }
+  const marker = button.querySelector('[data-panel-marker]');
+  if(marker){ marker.textContent = expanded ? '-' : '+'; }
+  if(expanded && body){
+    if(!body.style.height){ body.style.height = PANEL_DEFAULT_HEIGHT + 'px'; }
+    updateResizeHandleValue(body);
+    loadPanelOnFirstExpand(section, body);
+  }
+}
+function togglePanel(button){
+  const nextExpanded = button.getAttribute('aria-expanded') !== 'true';
+  setPanelExpanded(button, nextExpanded);
+}
+function keepCollapsedPanelHidden(target){
+  const section = target ? target.closest('section.admin-panel') : null;
+  if(!section || !section.classList.contains('is-collapsed')){ return; }
+  const body = section.querySelector('[data-resizable-panel]');
+  if(body){
+    body.hidden = true;
+    body.setAttribute('aria-hidden', 'true');
+  }
+}
+function writeText(id, value){
+  const target = document.getElementById(id);
+  if(!target){ return; }
+  target.textContent = value;
+  keepCollapsedPanelHidden(target);
+}
+function writeJson(id, value){ writeText(id, JSON.stringify(value, null, 2)); }
 async function j(url, opts={}) { const r = await fetch(url, opts); const t = await r.text(); try { return JSON.parse(t); } catch { return t; } }
-async function loadStatus(){ document.getElementById('status').textContent = JSON.stringify(await j('/api/status'), null, 2); }
-async function loadHealth(){ document.getElementById('health').textContent = JSON.stringify(await j('/api/health'), null, 2); }
-async function loadWakeDebug(){ document.getElementById('health').textContent = JSON.stringify(await j('/api/wake/debug'), null, 2); }
-async function migrateProductionWake(){ if(!confirm('Update saved config to the packaged local PocketSphinx production wake engine?')) return; document.getElementById('configResult').textContent = JSON.stringify(await j('/api/config/migrate-production-wake', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({confirm:true})}), null, 2); await loadStatus(); await loadConfig(); }
-async function simulateWake(){ document.getElementById('status').textContent = JSON.stringify(await j('/api/test/wake', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({confidence:1})}), null, 2); }
-async function loadConfig(){ const data = await j('/api/config'); document.getElementById('config').value = JSON.stringify(data.saved, null, 2); document.getElementById('configResult').textContent = JSON.stringify(data, null, 2); }
-async function saveDraft(){ const body = JSON.parse(document.getElementById('config').value); document.getElementById('configResult').textContent = JSON.stringify(await j('/api/config/draft', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)}), null, 2); }
-async function applyDraft(){ document.getElementById('configResult').textContent = JSON.stringify(await j('/api/config/apply', {method:'POST', headers:{'content-type':'application/json'}, body:'{}'}), null, 2); }
-async function uploadSound(){ const fd = new FormData(); const f = document.getElementById('soundFile').files[0]; fd.append('file', f); document.getElementById('sounds').textContent = JSON.stringify(await j('/api/sounds', {method:'POST', body:fd}), null, 2); }
-async function loadSounds(){ document.getElementById('sounds').textContent = JSON.stringify(await j('/api/sounds'), null, 2); }
-async function llmTtsTest(){ document.getElementById('tests').textContent = JSON.stringify(await j('/api/test/llm-tts', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('testText').value})}), null, 2); }
-async function micTest(){ document.getElementById('tests').textContent = JSON.stringify(await j('/api/test/microphone', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({duration_seconds:5})}), null, 2); }
-async function commandTest(){ document.getElementById('tests').textContent = JSON.stringify(await j('/api/test/command-recognition', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('commandText').value})}), null, 2); }
-async function loadEvents(){ const q = encodeURIComponent(document.getElementById('search').value); document.getElementById('events').textContent = JSON.stringify(await j('/api/telemetry/events?search='+q), null, 2); }
-initializeAdminPanels();
-initializeResizablePanels();
+async function loadStatus(){ writeJson('status', await j('/api/status')); }
+async function loadHealth(){ writeJson('health', await j('/api/health')); }
+async function loadWakeDebug(){ writeJson('health', await j('/api/wake/debug')); }
+async function migrateProductionWake(){ if(!confirm('Update saved config to the packaged local PocketSphinx production wake engine?')) return; writeJson('configResult', await j('/api/config/migrate-production-wake', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({confirm:true})})); await loadStatus(); await loadConfig(); }
+async function simulateWake(){ writeJson('status', await j('/api/test/wake', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({confidence:1})})); }
+async function loadConfig(){ const data = await j('/api/config'); document.getElementById('config').value = JSON.stringify(data.saved, null, 2); writeJson('configResult', data); }
+async function saveDraft(){ const body = JSON.parse(document.getElementById('config').value); writeJson('configResult', await j('/api/config/draft', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)})); }
+async function applyDraft(){ writeJson('configResult', await j('/api/config/apply', {method:'POST', headers:{'content-type':'application/json'}, body:'{}'})); }
+async function uploadSound(){ const fd = new FormData(); const f = document.getElementById('soundFile').files[0]; fd.append('file', f); writeJson('sounds', await j('/api/sounds', {method:'POST', body:fd})); }
+async function loadSounds(){ writeJson('sounds', await j('/api/sounds')); }
+async function llmTtsTest(){ writeJson('tests', await j('/api/test/llm-tts', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('testText').value})})); }
+async function micTest(){ writeJson('tests', await j('/api/test/microphone', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({duration_seconds:5})})); }
+async function commandTest(){ writeJson('tests', await j('/api/test/command-recognition', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:document.getElementById('commandText').value})})); }
+async function loadEvents(){ const q = encodeURIComponent(document.getElementById('search').value); writeJson('events', await j('/api/telemetry/events?search='+q)); }
+function initializeAdminPortal(){
+  initializeResizablePanels();
+  document.querySelectorAll('.admin-panel-toggle').forEach((button) => setPanelExpanded(button, false));
+}
+if(document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', initializeAdminPortal);
+} else {
+  initializeAdminPortal();
+}
 </script>
 </body>
 </html>
