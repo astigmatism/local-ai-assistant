@@ -12,6 +12,7 @@ def test_default_configuration_matches_design_inventory(tmp_path):
     assert cfg.conversation.inactivity_timeout_seconds == 60.0
     assert cfg.telemetry.retention_days == 365
     assert cfg.telemetry.cleanup_interval == "daily"
+    assert cfg.wake.active_wake_phrase == "Rosalina"
     assert cfg.wake.active_wake_phrase in cfg.wake.wake_phrases
     assert {command.intent for command in cfg.command_registry.commands} == {
         CommandIntent.CANCEL_STOP,

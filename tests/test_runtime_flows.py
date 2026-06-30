@@ -10,7 +10,7 @@ from voice_assistant.wake import WakeDetection
 
 
 def detection():
-    return WakeDetection("computer", 0.99, "simulated", 0.0)
+    return WakeDetection("Rosalina", 0.99, "simulated", 0.0)
 
 
 @pytest.mark.asyncio

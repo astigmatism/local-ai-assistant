@@ -255,7 +255,7 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
         )
         return {
             **result.model_dump(mode="json"),
-            "message": "Saved config now uses the packaged local PocketSphinx external_command wake engine. Verify /api/status and /api/health, then use voice-only wake.",
+            "message": "Saved config now uses the packaged local PocketSphinx external_command wake engine with Rosalina as the active production phrase. Verify /api/status and /api/health, then use voice-only wake.",
         }
 
     @app.get("/api/config/export")

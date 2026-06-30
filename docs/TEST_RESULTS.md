@@ -10,7 +10,7 @@ PYTHONPATH=src pytest -q
 Result:
 
 ```text
-42 passed
+45 passed
 ```
 
-Coverage added in this update includes production wake config validation, simulated wake diagnostics preservation, the rolling finite-window `arecord -d N` -> `pocketsphinx_continuous -infile /dev/stdin` production wake wrapper, external wake stdout parsing, external wake subprocess termination, stderr surfacing for subprocess failures, pause/resume behavior, wake health failures for missing commands/models/runtime, migration from persisted simulated wake to the packaged production engine, local command gating only after wake and prompt capture, and the LLM no-model router request contract.
+Coverage in this update includes production wake config validation for `Rosalina`, automatic migration away from the old packaged default phrase, simulated wake diagnostics preservation, custom PocketSphinx dictionary generation for `rosalina`, overlapping `arecord` rolling-buffer windows decoded by `pocketsphinx_continuous -infile /dev/stdin`, diagnostic summary statistics, external wake stdout parsing, external wake subprocess termination, stderr surfacing for subprocess failures, pause/resume behavior, wake health failures for missing commands/models/runtime, migration from persisted simulated wake to the packaged production engine, local command gating only after wake and prompt capture, and the LLM no-model router request contract.

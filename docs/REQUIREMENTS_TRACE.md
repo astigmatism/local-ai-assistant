@@ -6,7 +6,7 @@ This matrix maps the V1 design requirements to implementation artifacts and auto
 |---|---|---|
 | 3-4 Product summary and V1 scope: wake, acknowledgement, capture, local command gate, STT, LLM, TTS, conversation, barge-in, telemetry, admin portal | `assistant.py`, `wake.py`, `audio.py`, `commands.py`, `clients.py`, `conversation.py`, `telemetry.py`, `app.py` | `test_runtime_flows.py::test_normal_prompt_flow_stt_llm_tts_playback_and_context`, `test_admin_api.py::test_admin_portal_and_status_need_no_auth` |
 | 5 Non-goals: no physical controls, no smart home, no timers, no help/repeat, no voice restart/reboot, no reset-to-defaults, no auth | No voice-command registry entries beyond v1 intents; no reset endpoint; no auth dependencies | `test_config_and_clients.py::test_default_configuration_matches_design_inventory`, `test_commands_and_conversation.py::test_command_aliases_and_disabled_state` |
-| 7.1 Local wake-word detection, not main STT | `wake.py` local engine adapters; `pocketsphinx_wake.py` local PocketSphinx production adapter; STT client is only called after command gate | `test_production_wake.py::test_default_config_uses_packaged_production_external_wake_engine`, `test_runtime_flows.py::test_cancel_command_is_local_and_preserves_context` |
+| 7.1 Local wake-word detection, not main STT | `wake.py` local engine adapters; `pocketsphinx_wake.py` local PocketSphinx production adapter; STT client is only called after command gate | `test_production_wake.py::test_default_config_uses_packaged_production_external_wake_engine_with_rosalina`, `test_runtime_flows.py::test_cancel_command_is_local_and_preserves_context` |
 | 7.3 and 17 local status feedback uses sound effects, not local spoken phrases | `constants.py::SoundEvent`, `audio.py`, config sound event map | `test_config_and_clients.py::test_default_configuration_matches_design_inventory`, runtime tests assert sound events |
 | 7.4 Configurable behavior | `config.py`, admin config endpoints | `test_config_and_clients.py`, `test_admin_api.py::test_config_draft_apply_export_import_and_restart_pending` |
 | 7.5 and 10 Local command gate before main STT and whole-utterance matching | `commands.py`, `assistant.py::_recognize_command_safely` | `test_commands_and_conversation.py::test_command_matching_uses_whole_utterance_not_substrings`, `test_runtime_flows.py::test_cancel_command_is_local_and_preserves_context` |
@@ -43,7 +43,7 @@ Automated tests use fake audio and fake services so they can run without `/dev/s
 1. EMEET microphone capture through `arecord`.
 2. EMEET speaker playback through `aplay`.
 3. Mixer volume enforcement through `amixer -c 0 sset PCM 100% unmute`.
-4. Packaged production wake process with `python -m voice_assistant.pocketsphinx_wake --self-test`, then voice-only `computer` detection.
+4. Packaged production wake process with `python -m voice_assistant.pocketsphinx_wake --self-test`, then voice-only `Rosalina` detection.
 5. Optional Vosk command recognizer model path if using local command audio recognition.
 6. Whisper, Ollama router, and Kokoro service reachability with real keys.
 7. Admin portal availability only on the trusted LAN.

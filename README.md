@@ -11,7 +11,7 @@ The service is responsible for local wake-word orchestration, post-wake prompt c
 - Configurable local wake-word engine abstraction:
   - `simulated` for tests/admin diagnostics.
   - `openwakeword` adapter for local openWakeWord microphone inference.
-  - `external_command` adapter for a local wake-word process that emits detections; the packaged production command wraps local PocketSphinx keyword spotting for `computer`.
+  - `external_command` adapter for a local wake-word process that emits detections; the packaged production command wraps local PocketSphinx keyword spotting for `Rosalina`.
 - Local command registry with whole-utterance matching and only the two required v1 intents by default: `cancel_stop` and `new_conversation`.
 - Optional local Vosk command recognizer for command-audio transcription before main STT.
 - OpenAI-compatible Whisper STT client.
@@ -143,8 +143,8 @@ Fresh production deployments default to the packaged local PocketSphinx external
 {
   "wake": {
     "engine": "external_command",
-    "wake_phrases": ["computer"],
-    "active_wake_phrase": "computer",
+    "wake_phrases": ["Rosalina"],
+    "active_wake_phrase": "Rosalina",
     "external_command": ["python", "-m", "voice_assistant.pocketsphinx_wake"],
     "external_health_command": ["python", "-m", "voice_assistant.pocketsphinx_wake", "--self-test"],
     "sensitivity": 0.5
@@ -152,7 +152,9 @@ Fresh production deployments default to the packaged local PocketSphinx external
 }
 ```
 
-The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us` at image build time, so no wake model is downloaded at runtime. The packaged wake subprocess is long-running, but it does **not** keep one endless `arecord | pocketsphinx_continuous` pipe open. Instead, it repeatedly captures finite raw PCM windows with `arecord -d 4`, sends each window to `pocketsphinx_continuous -infile /dev/stdin`, parses the decoder output after PocketSphinx sees EOF, and starts the next window. This matches the target hardware result where finite chunks detected `computer` while the endless pipe stayed silent. It intentionally avoids PocketSphinx's `-inmic yes -adcdev ...` live microphone mode because that backend failed on the target EMEET/ALSA deployment. The subprocess reads only local microphone audio and emits JSON wake detections to the app with `engine: pocketsphinx_continuous_arecord_chunk`. During prompt capture the app pauses the wake subprocess so ALSA capture is owned by the prompt recorder; after capture it resumes wake listening for barge-in during STT, LLM, TTS, and playback.
+The Dockerfile installs `alsa-utils`, `pocketsphinx`, and `pocketsphinx-en-us` at image build time, so no wake model is downloaded at runtime. The packaged wake subprocess keeps a continuous local `arecord` raw PCM capture open, snapshots a rolling in-memory buffer, and sends overlapping finite decode windows to `pocketsphinx_continuous -infile /dev/stdin`. Defaults are a 4.0 second decode window, 1.0 second hop, 3.0 seconds of overlap, and a 1.5 second detection cooldown. This keeps PocketSphinx's EOF-per-window behavior while reducing boundary misses from non-overlapping chunks. It intentionally avoids PocketSphinx's `-inmic yes -adcdev ...` live microphone mode because that backend failed on the target EMEET/ALSA deployment. The subprocess reads only local microphone audio and emits JSON wake detections to the app with `engine: pocketsphinx_continuous_arecord_overlap`. During prompt capture the app pauses the wake subprocess so ALSA capture is owned by the prompt recorder; after capture it resumes wake listening for barge-in during STT, LLM, TTS, and playback.
+
+If `Rosalina` is not present in the selected PocketSphinx dictionary, the wrapper creates a deterministic merged runtime dictionary under `/tmp/voice-assistant-pocketsphinx/` with CMU-style pronunciations for `rosalina`; it does not edit the system dictionary in place.
 
 `simulated` remains available for admin/test diagnostics through `POST /api/test/wake`, but status, health, and the admin portal label it as diagnostic-only. `openwakeword` remains as an optional adapter, but the packaged production path no longer depends on its Python 3.12 optional dependency stack.
 
@@ -207,7 +209,7 @@ curl -sS http://192.168.1.23:8080/api/health
 ```
 
 `/api/status` should show `wake_engine` as `external_command`, not `simulated`.
-It should also show `wake.process_running` as `true` and `wake.packaged_backend` as `pocketsphinx_continuous_arecord_chunk`; if the subprocess exits, `wake.last_error` and `wake.stderr_tail` report the most recent wrapper/capture failure.
+It should also show `wake.process_running` as `true`, `wake.active_wake_phrase` as `Rosalina`, and `wake.packaged_backend` as `pocketsphinx_continuous_arecord_overlap`; if the subprocess exits, `wake.last_error` and `wake.stderr_tail` report the most recent wrapper/capture failure.
 
 To build with optional openWakeWord and Vosk dependencies:
 

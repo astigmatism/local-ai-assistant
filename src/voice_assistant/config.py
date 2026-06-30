@@ -18,7 +18,7 @@ RESTART_REQUIRED_PREFIXES = {
     "services.tts",
 }
 
-DEFAULT_WAKE_PHRASE = "computer"
+DEFAULT_WAKE_PHRASE = "Rosalina"
 DEFAULT_PRODUCTION_WAKE_COMMAND = ["python", "-m", "voice_assistant.pocketsphinx_wake"]
 DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND = [*DEFAULT_PRODUCTION_WAKE_COMMAND, "--self-test"]
 
@@ -288,26 +288,53 @@ def _requires_restart(path: str) -> bool:
     return any(path == prefix or path.startswith(prefix + ".") for prefix in RESTART_REQUIRED_PREFIXES)
 
 
+def _normalise_wake_phrases_for_rosalina(wake: dict[str, Any], *, force_active: bool) -> dict[str, Any]:
+    phrases = [str(phrase).strip() for phrase in wake.get("wake_phrases", []) if str(phrase).strip()]
+    # The old packaged production default was "computer". Do not carry it forward as a production
+    # phrase during automatic or explicit migration; keep only non-empty custom phrases plus Rosalina.
+    phrases = [phrase for phrase in phrases if phrase.lower() != "computer"]
+    if not any(phrase.lower() == DEFAULT_WAKE_PHRASE.lower() for phrase in phrases):
+        phrases.insert(0, DEFAULT_WAKE_PHRASE)
+
+    active = str(wake.get("active_wake_phrase") or DEFAULT_WAKE_PHRASE).strip() or DEFAULT_WAKE_PHRASE
+    if force_active or active.lower() == "computer":
+        active = DEFAULT_WAKE_PHRASE
+    if not any(phrase == active for phrase in phrases):
+        phrases.append(active)
+
+    migrated = dict(wake)
+    migrated["wake_phrases"] = phrases
+    migrated["active_wake_phrase"] = active
+    return migrated
+
+
 def production_wake_config(config: AssistantConfig) -> AssistantConfig:
-    """Return a config with only the wake source migrated to the packaged production engine."""
+    """Return a config migrated to the packaged Rosalina production wake engine."""
 
     data = config.public_dict()
-    wake = dict(data.get("wake", {}))
-    phrases = [str(phrase).strip() for phrase in wake.get("wake_phrases", []) if str(phrase).strip()]
-    active = str(wake.get("active_wake_phrase") or DEFAULT_WAKE_PHRASE).strip() or DEFAULT_WAKE_PHRASE
-    if active not in phrases:
-        phrases.append(active)
+    wake = _normalise_wake_phrases_for_rosalina(dict(data.get("wake", {})), force_active=True)
     wake.update(
         {
             "engine": "external_command",
-            "wake_phrases": phrases,
-            "active_wake_phrase": active,
             "external_command": list(DEFAULT_PRODUCTION_WAKE_COMMAND),
             "external_health_command": list(DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND),
         }
     )
     data["wake"] = wake
     return AssistantConfig.model_validate(data)
+
+
+def migrate_legacy_default_wake_phrase(config: AssistantConfig) -> AssistantConfig:
+    """Upgrade persisted configs that still use the old packaged "computer" default."""
+
+    data = config.public_dict()
+    wake = dict(data.get("wake", {}))
+    active = str(wake.get("active_wake_phrase") or "").strip().lower()
+    phrases = [str(phrase).strip().lower() for phrase in wake.get("wake_phrases", []) if str(phrase).strip()]
+    if active == "computer" or ("computer" in phrases and DEFAULT_WAKE_PHRASE.lower() not in phrases):
+        data["wake"] = _normalise_wake_phrases_for_rosalina(wake, force_active=active == "computer")
+        return AssistantConfig.model_validate(data)
+    return config
 
 
 class ConfigStore:
@@ -334,7 +361,7 @@ class ConfigStore:
             return AssistantConfig()
         with self.config_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
-        return AssistantConfig.model_validate(data)
+        return migrate_legacy_default_wake_phrase(AssistantConfig.model_validate(data))
 
     @staticmethod
     def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -452,4 +479,5 @@ __all__ = [
     "DEFAULT_PRODUCTION_WAKE_COMMAND",
     "DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND",
     "production_wake_config",
+    "migrate_legacy_default_wake_phrase",
 ]

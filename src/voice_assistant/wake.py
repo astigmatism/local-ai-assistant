@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .config import AssistantConfig
+from . import pocketsphinx_wake
 
 
 @dataclass(frozen=True)
@@ -84,15 +85,16 @@ class SimulatedWakeWordEngine(WakeWordEngine):
 class ExternalCommandWakeWordEngine(WakeWordEngine):
     """Runs a local wake-word process and treats each stdout wake line as a wake event.
 
-    The bundled production command is ``python -m voice_assistant.pocketsphinx_wake``. It runs
-    a rolling loop of finite ``arecord -d N`` capture windows against the configured ALSA device,
-    pipes each raw 16 kHz mono PCM window into ``pocketsphinx_continuous -infile /dev/stdin``,
-    and emits JSON wake events on stdout after PocketSphinx receives EOF for a window. The finite
-    chunks are required on the target thin client because the successful hardware test needed
-    PocketSphinx to receive EOF for each short window. The adapter also preserves the legacy
-    contract that non-empty stdout lines are wake events, so custom external detectors can still be
-    used if they write detections only to stdout and diagnostic logs to stderr. Recent stderr lines
-    are captured in status for deployment debugging.
+    The bundled production command is ``python -m voice_assistant.pocketsphinx_wake``. It keeps a
+    local continuous ``arecord`` raw PCM capture open against the configured ALSA device, snapshots
+    a rolling recent-audio buffer, pipes each overlapping finite decode window into
+    ``pocketsphinx_continuous -infile /dev/stdin``, and emits JSON wake events on stdout after
+    PocketSphinx receives EOF for a window. This keeps pre-wake audio local, avoids the target
+    thin client's failed PocketSphinx ``-inmic yes`` backend, and reduces wake words missed at
+    fixed chunk boundaries. The adapter also preserves the legacy contract that non-empty stdout
+    lines can be wake events, so custom external detectors can still be used if they write
+    detections only to stdout and diagnostic logs to stderr. Recent stderr lines are captured in
+    status for deployment debugging.
     """
 
     def __init__(
@@ -323,15 +325,24 @@ class ExternalCommandWakeWordEngine(WakeWordEngine):
 
     def status(self) -> dict[str, Any]:
         executable = self.command[0] if self.command else ""
+        default_threshold = pocketsphinx_wake.threshold_from_sensitivity(self.sensitivity)
+        window_seconds = _env_float_default("VOICE_ASSISTANT_WAKE_WINDOW_SECONDS", pocketsphinx_wake.DEFAULT_WINDOW_SECONDS)
+        hop_seconds = _env_float_default("VOICE_ASSISTANT_WAKE_HOP_SECONDS", pocketsphinx_wake.DEFAULT_HOP_SECONDS)
         return {
             "engine": "external_command",
             "mode": "production_local_subprocess",
             "production_ready": True,
             "input_source": "local microphone via external wake process",
-            "packaged_backend": "pocketsphinx_continuous_arecord_chunk",
+            "packaged_backend": pocketsphinx_wake.ENGINE_NAME,
+            "capture_backend": pocketsphinx_wake.CAPTURE_BACKEND,
             "capture_device": self.capture_device,
             "sample_rate_hz": self.sample_rate_hz,
             "channels": self.channels,
+            "threshold": _env_text_default("VOICE_ASSISTANT_POCKETSPHINX_THRESHOLD", default_threshold),
+            "window_seconds": window_seconds,
+            "hop_seconds": hop_seconds,
+            "overlap_seconds": max(0.0, window_seconds - hop_seconds),
+            "cooldown_seconds": _env_float_default("VOICE_ASSISTANT_WAKE_COOLDOWN_SECONDS", pocketsphinx_wake.DEFAULT_COOLDOWN_SECONDS),
             "command": list(self.command),
             "executable_available": bool(executable and shutil.which(executable)),
             "process_running": self._process_running,
@@ -451,6 +462,23 @@ class OpenWakeWordEngine(WakeWordEngine):
             "last_detection": self._last_detection,
             "admin_test_endpoint_available": True,
         }
+
+
+def _env_text_default(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
+
+
+def _env_float_default(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
 
 
 def _coerce_float(value: object) -> float | None:

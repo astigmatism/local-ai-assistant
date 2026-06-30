@@ -54,7 +54,7 @@ curl -sS -X POST http://<assistant-ip>:8080/api/config/migrate-production-wake \
 
 10. Configure the local command recognizer for production command audio if desired. Vosk is supported with a local model path. The default configured-text recognizer is intended for tests and diagnostics.
 
-11. Use the microphone test, sound tests, command-recognition test, typed LLM/TTS test, and then a voice-only `computer` wake test before enabling unattended use.
+11. Use the microphone test, sound tests, command-recognition test, typed LLM/TTS test, and then a voice-only `Rosalina` wake test before enabling unattended use.
 
 ## Production wake verification
 
@@ -71,11 +71,11 @@ docker compose exec voice-assistant python -m voice_assistant.pocketsphinx_wake 
 curl -sS http://<assistant-ip>:8080/api/wake/debug
 ```
 
-The self-test should report `engine: pocketsphinx_continuous_arecord_chunk`, `capture_backend: arecord_chunk`, `chunk_seconds: 4.0`, and `cooldown_seconds: 1.5`. `/api/status` should show `wake.process_running: true`; if the subprocess cannot keep running, inspect `wake.last_error` and `wake.stderr_tail` for the most recent `arecord` or PocketSphinx wrapper error.
+The self-test should report `engine: pocketsphinx_continuous_arecord_overlap`, `capture_backend: arecord_stream_overlap`, `window_seconds: 4.0`, `hop_seconds: 1.0`, `overlap_seconds: 3.0`, and `cooldown_seconds: 1.5`. `/api/status` should show `wake.process_running: true`; if the subprocess cannot keep running, inspect `wake.last_error` and `wake.stderr_tail` for the most recent `arecord` or PocketSphinx wrapper error.
 
 Manual voice-only validation on the EMEET speakerphone:
 
-1. Say `computer` without pressing keys, opening the portal, using SSH, or posting to `/api/test/wake`.
+1. Say `Rosalina` without pressing keys, opening the portal, using SSH, or posting to `/api/test/wake`.
 2. Hear the wake acknowledgement.
 3. Ask a short question.
 4. Hear the response.
