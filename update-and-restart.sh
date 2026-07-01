@@ -26,7 +26,7 @@ REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
 
 TEST_MODE="${TEST_MODE:-container-mounted}"
-TEST_CMD="${TEST_CMD:-PYTHONPATH=src python -m pytest -q}"
+TEST_CMD="${TEST_CMD:-mkdir -p /tmp/local-ai-assistant-pytest && VOICE_ASSISTANT_CONFIG=/tmp/local-ai-assistant-pytest/config.json PYTHONPATH=src python -m pytest -q}"
 TEST_PATHS="${TEST_PATHS:-tests}"
 REQUIRE_TESTS="${REQUIRE_TESTS:-true}"
 CONTAINER_TEST_PACKAGES="${CONTAINER_TEST_PACKAGES:-pytest pytest-asyncio}"
@@ -65,7 +65,7 @@ Environment overrides:
   BRANCH=main
 
   TEST_MODE=container-mounted|host|none
-  TEST_CMD='PYTHONPATH=src python -m pytest -q'
+  TEST_CMD='mkdir -p /tmp/local-ai-assistant-pytest && VOICE_ASSISTANT_CONFIG=/tmp/local-ai-assistant-pytest/config.json PYTHONPATH=src python -m pytest -q'
   TEST_PATHS=tests
   REQUIRE_TESTS=true|false
   CONTAINER_TEST_PACKAGES='pytest pytest-asyncio'
@@ -99,6 +99,7 @@ Behavior:
      - A temporary test venv is created inside that one-off container.
      - pytest and pytest-asyncio are installed into that temporary venv.
      - Production runtime env vars are unset before tests so tests use their expected defaults.
+     - The default test command sets VOICE_ASSISTANT_CONFIG to a writable /tmp config path.
      - The runtime image and host checkout are not modified by test setup.
   7. Recreates/restarts the app only after tests pass.
   8. Waits for the app health endpoint.
