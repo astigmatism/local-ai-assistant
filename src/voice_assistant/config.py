@@ -113,6 +113,19 @@ class CommandRecognizerConfig(BaseModel):
     pocketsphinx_dict_path: str = DEFAULT_POCKETSPHINX_DICT_PATH
     pocketsphinx_lm_path: str | None = DEFAULT_POCKETSPHINX_LM_PATH
     pocketsphinx_timeout_seconds: float = Field(6.0, gt=0.0)
+    pocketsphinx_keyphrase_threshold: str = "1e-20"
+    pocketsphinx_speech_rms_threshold: int = Field(500, ge=0)
+    pocketsphinx_keyphrase_seconds_per_word: float = Field(0.65, gt=0.0)
+    pocketsphinx_keyphrase_padding_seconds: float = Field(0.45, ge=0.0)
+    pocketsphinx_keyphrase_max_speech_seconds: float = Field(2.75, gt=0.0)
+
+    @field_validator("pocketsphinx_keyphrase_threshold")
+    @classmethod
+    def pocketsphinx_keyphrase_threshold_non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("pocketsphinx_keyphrase_threshold must not be empty")
+        return value
 
     @field_validator("pocketsphinx_command")
     @classmethod
@@ -447,8 +460,13 @@ def migrate_legacy_default_wake_phrase(config: AssistantConfig) -> AssistantConf
     return config
 
 
-def migrate_legacy_configured_text_command_recognizer(config: AssistantConfig, raw_data: dict[str, Any] | None = None) -> AssistantConfig:
-    """Upgrade old persisted default command recognizers to a production local-audio recognizer."""
+def migrate_legacy_configured_text_command_recognizer(
+    config: AssistantConfig,
+    raw_data: dict[str, Any] | None = None,
+    *,
+    include_saved_pocketsphinx_defaults: bool = False,
+) -> AssistantConfig:
+    """Upgrade persisted default command recognizers to the production local-audio recognizer."""
 
     raw_recognizer = {}
     if isinstance(raw_data, dict):
@@ -456,9 +474,10 @@ def migrate_legacy_configured_text_command_recognizer(config: AssistantConfig, r
         if isinstance(raw_registry, dict) and isinstance(raw_registry.get("recognizer"), dict):
             raw_recognizer = dict(raw_registry["recognizer"])
     legacy_keys = {"engine", "vosk_model_path", "confidence_threshold"}
-    is_legacy_configured_text = (
-        raw_recognizer.get("engine") == "configured_text"
-        and set(raw_recognizer).issubset(legacy_keys)
+    pocket_sphinx_keys = {key for key in raw_recognizer if str(key).startswith("pocketsphinx_")}
+    is_legacy_configured_text = raw_recognizer.get("engine") == "configured_text" and (
+        set(raw_recognizer).issubset(legacy_keys)
+        or (include_saved_pocketsphinx_defaults and bool(pocket_sphinx_keys))
     )
     if not is_legacy_configured_text:
         return config
@@ -496,7 +515,7 @@ class ConfigStore:
             data = json.load(handle)
         self._loaded_saved_data = copy.deepcopy(data)
         loaded = migrate_legacy_default_wake_phrase(AssistantConfig.model_validate(data))
-        return migrate_legacy_configured_text_command_recognizer(loaded, data)
+        return migrate_legacy_configured_text_command_recognizer(loaded, data, include_saved_pocketsphinx_defaults=True)
 
     @staticmethod
     def _write_json(path: Path, data: dict[str, Any]) -> None:

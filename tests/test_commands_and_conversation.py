@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -132,6 +133,96 @@ async def test_pocketsphinx_recognizer_rejects_longer_local_transcripts_with_com
     )
 
     assert await recognizer.recognize(wav_path, registry) is None
+
+
+
+
+@pytest.mark.asyncio
+async def test_pocketsphinx_keyphrase_fallback_catches_short_cancel_when_language_model_misses(monkeypatch, tmp_path):
+    wav_path = write_wav(tmp_path / "prompt.wav", duration=0.45)
+    registry = CommandRegistry(AssistantConfig().command_registry)
+    captured_commands: list[tuple[str, ...]] = []
+
+    async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
+        captured_commands.append(tuple(command))
+        if "-lm" in command:
+            return _FakePocketsphinxProcess(b"000000000: council\n")
+        if "-kws" in command:
+            kws_path = command[command.index("-kws") + 1]
+            assert "cancel" in Path(kws_path).read_text(encoding="utf-8")
+            return _FakePocketsphinxProcess(b"000000000: cancel\n")
+        raise AssertionError(f"unexpected PocketSphinx command: {command}")
+
+    monkeypatch.setattr(commands_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(commands_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    recognizer = PocketsphinxCommandRecognizer(
+        command=["pocketsphinx_continuous"],
+        hmm_path="/model/hmm",
+        dict_path="/model/dict",
+        lm_path="/model/lm.bin",
+        timeout_seconds=1.0,
+    )
+
+    match = await recognizer.recognize(wav_path, registry)
+
+    assert match is not None
+    assert match.intent == CommandIntent.CANCEL_STOP.value
+    assert match.alias == "cancel"
+    assert any("-kws" in command for command in captured_commands)
+    assert recognizer.last_diagnostics["path"] == "keyphrase"
+    assert recognizer.last_diagnostics["matched"] is True
+
+
+@pytest.mark.asyncio
+async def test_pocketsphinx_keyphrase_fallback_rejects_keyword_inside_longer_language_candidate(monkeypatch, tmp_path):
+    wav_path = write_wav(tmp_path / "prompt.wav", duration=0.45)
+    registry = CommandRegistry(AssistantConfig().command_registry)
+
+    async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
+        if "-lm" in command:
+            return _FakePocketsphinxProcess(b"000000000: How do I cancel a process in Linux?\n")
+        if "-kws" in command:
+            return _FakePocketsphinxProcess(b"000000000: cancel\n")
+        raise AssertionError(f"unexpected PocketSphinx command: {command}")
+
+    monkeypatch.setattr(commands_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(commands_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    recognizer = PocketsphinxCommandRecognizer(
+        command=["pocketsphinx_continuous"],
+        hmm_path="/model/hmm",
+        dict_path="/model/dict",
+        lm_path="/model/lm.bin",
+        timeout_seconds=1.0,
+    )
+
+    assert await recognizer.recognize(wav_path, registry) is None
+    assert recognizer.last_diagnostics["reason"] == "language_model_heard_more_than_command_alias"
+
+
+@pytest.mark.asyncio
+async def test_pocketsphinx_keyphrase_fallback_rejects_long_active_speech_span(monkeypatch, tmp_path):
+    wav_path = write_wav(tmp_path / "prompt.wav", duration=1.8)
+    registry = CommandRegistry(AssistantConfig().command_registry)
+
+    async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
+        if "-lm" in command:
+            return _FakePocketsphinxProcess(b"")
+        if "-kws" in command:
+            return _FakePocketsphinxProcess(b"000000000: cancel\n")
+        raise AssertionError(f"unexpected PocketSphinx command: {command}")
+
+    monkeypatch.setattr(commands_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(commands_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    recognizer = PocketsphinxCommandRecognizer(
+        command=["pocketsphinx_continuous"],
+        hmm_path="/model/hmm",
+        dict_path="/model/dict",
+        lm_path="/model/lm.bin",
+        timeout_seconds=1.0,
+    )
+
+    assert await recognizer.recognize(wav_path, registry) is None
+    assert recognizer.last_diagnostics["reason"] == "speech_span_too_long_for_command_alias"
 
 
 @pytest.mark.asyncio

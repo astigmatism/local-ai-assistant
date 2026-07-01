@@ -447,6 +447,10 @@ class AssistantRuntime:
         try:
             command = await self.command_recognizer.recognize(capture.path, registry)
         except Exception as exc:
+            diagnostics = getattr(self.command_recognizer, "last_diagnostics", None)
+            data = {"sound_event": SoundEvent.COMMAND_THINKING.value, "route": "normal_stt"}
+            if isinstance(diagnostics, dict):
+                data["recognizer_diagnostics"] = diagnostics
             self.telemetry.log_event(
                 EventType.COMMAND_RECOGNITION_RESULT,
                 "Local command recognizer failed; continuing to normal STT pipeline.",
@@ -456,9 +460,10 @@ class AssistantRuntime:
                 component="local_command_recognizer",
                 success=False,
                 error=str(exc),
-                data={"sound_event": SoundEvent.COMMAND_THINKING.value, "route": "normal_stt"},
+                data=data,
             )
             return None
+        diagnostics = getattr(self.command_recognizer, "last_diagnostics", None)
         self.telemetry.log_event(
             EventType.COMMAND_RECOGNITION_RESULT,
             "Local command recognition completed.",
@@ -473,6 +478,7 @@ class AssistantRuntime:
                 "alias": command.alias if command else None,
                 "sound_event": SoundEvent.COMMAND_THINKING.value,
                 "route": "local_command" if command else "normal_stt",
+                "recognizer_diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
             },
         )
         return command
