@@ -105,6 +105,57 @@ async def test_regenerate_generated_tts_sounds_rejects_invalid_wav_without_overw
     assert existing.read_bytes() == b"old wake"
 
 
+
+
+async def test_regenerate_generated_tts_sounds_preserves_existing_file_ownership_without_chown(tmp_path, monkeypatch):
+    cfg_data = AssistantConfig().public_dict()
+    cfg_data["sounds"]["library_dir"] = str(tmp_path)
+    cfg_data["sounds"]["generated_tts_phrases"] = ["wake ack"]
+    cfg = AssistantConfig.model_validate(cfg_data)
+    existing = tmp_path / "wake_ack.wav"
+    existing.write_bytes(b"old wake")
+    original_stat = existing.stat()
+    chown_calls: list[tuple[str, int, int]] = []
+
+    def fail_if_chown_called(path, uid, gid):
+        chown_calls.append((str(path), uid, gid))
+        raise PermissionError("chown should not be required")
+
+    monkeypatch.setattr(tts_voice_module.os, "chown", fail_if_chown_called)
+    tts = RecordingTTS()
+
+    result = await regenerate_generated_tts_sounds(cfg, lambda _cfg: tts, voice="bf_emma")
+
+    assert result["generated_files"][0]["overwritten"] is True
+    assert existing.read_bytes() != b"old wake"
+    assert existing.stat().st_uid == original_stat.st_uid
+    assert existing.stat().st_gid == original_stat.st_gid
+    assert chown_calls == []
+
+
+async def test_regenerate_generated_tts_sounds_creates_new_file_without_chown(tmp_path, monkeypatch):
+    cfg_data = AssistantConfig().public_dict()
+    cfg_data["sounds"]["library_dir"] = str(tmp_path)
+    cfg_data["sounds"]["generated_tts_phrases"] = ["new phrase"]
+    cfg = AssistantConfig.model_validate(cfg_data)
+    chown_calls: list[tuple[str, int, int]] = []
+
+    def fail_if_chown_called(path, uid, gid):
+        chown_calls.append((str(path), uid, gid))
+        raise PermissionError("chown should not be required")
+
+    monkeypatch.setattr(tts_voice_module.os, "chown", fail_if_chown_called)
+    tts = RecordingTTS()
+
+    result = await regenerate_generated_tts_sounds(cfg, lambda _cfg: tts, voice="bf_emma")
+
+    created = tmp_path / "new_phrase.wav"
+    assert result["generated_files"][0]["overwritten"] is False
+    assert created.exists()
+    assert oct(created.stat().st_mode & 0o777) == "0o664"
+    assert chown_calls == []
+
+
 async def test_regenerate_generated_tts_sounds_checks_sound_directory_before_synthesis(tmp_path, monkeypatch):
     cfg_data = AssistantConfig().public_dict()
     cfg_data["sounds"]["library_dir"] = str(tmp_path)

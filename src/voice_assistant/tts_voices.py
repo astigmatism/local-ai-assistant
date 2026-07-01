@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import unicodedata
 import uuid
 import wave
@@ -156,7 +157,6 @@ async def regenerate_generated_tts_sounds(
 
     sound_dir = Path(effective_config.sounds.library_dir)
     _verify_sound_library_writable(sound_dir)
-    owner_group = sound_dir.stat()
     generated: list[dict[str, Any]] = []
     touched: set[str] = set()
 
@@ -170,17 +170,19 @@ async def regenerate_generated_tts_sounds(
         try:
             await tts_factory(effective_config).synthesize(phrase, tmp_path)
             wav_details = _validate_wav(tmp_path)
-            tmp_path.replace(final_path)
-            os.chmod(final_path, 0o644)
-            current_owner = final_path.stat()
-            if (current_owner.st_uid, current_owner.st_gid) != (owner_group.st_uid, owner_group.st_gid):
-                os.chown(final_path, owner_group.st_uid, owner_group.st_gid)
+            overwritten = final_path.exists()
+            if overwritten:
+                with tmp_path.open("rb") as source_file, final_path.open("wb") as target_file:
+                    shutil.copyfileobj(source_file, target_file)
+            else:
+                tmp_path.replace(final_path)
+                os.chmod(final_path, 0o664)
             generated.append(
                 {
                     "phrase": phrase,
                     "filename": final_name,
                     "path": str(final_path),
-                    "overwritten": True,
+                    "overwritten": overwritten,
                     "wav": wav_details,
                 }
             )
