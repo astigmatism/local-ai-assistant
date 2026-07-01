@@ -16,7 +16,7 @@ from voice_assistant.telemetry import utc_now
 
 @pytest.mark.parametrize(
     "phrase",
-    ["stop", "cancel", "forget it", "never mind", " Stop. ", "CANCEL", "Never mind!"],
+    ["stop", "Stop.", "cancel", "Cancel.", "forget it", "Forget it.", "never mind", "Never mind!", " Stop. ", "CANCEL"],
 )
 def test_cancel_stop_aliases_match_whole_command_utterance_variants(phrase):
     registry = CommandRegistry(AssistantConfig().command_registry)
@@ -29,7 +29,7 @@ def test_cancel_stop_aliases_match_whole_command_utterance_variants(phrase):
 
 @pytest.mark.parametrize(
     "phrase",
-    ["How do I stop a Linux service?", "How do I cancel a process in Linux?", "please stop talking"],
+    ["How do I stop a Linux service?", "How do I cancel a process in Linux?", "Can you explain what never mind means?", "I forgot it yesterday", "please stop talking"],
 )
 def test_command_matching_uses_whole_utterance_not_substrings(phrase):
     registry = CommandRegistry(AssistantConfig().command_registry)

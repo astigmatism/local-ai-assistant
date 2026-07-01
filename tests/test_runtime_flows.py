@@ -26,7 +26,7 @@ async def test_normal_prompt_flow_stt_llm_tts_playback_and_context(bundle_parts)
     await runtime.wait_until_idle()
 
     assert runtime.state.state == RuntimeState.IDLE
-    assert stt.calls
+    assert len(stt.calls) == 1
     assert llm.messages[0][-1] == {"role": "user", "content": "what is the weather"}
     assert tts.inputs == ["It is sunny."]
     assert any(call == ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION)) for call in audio.calls)
@@ -39,7 +39,8 @@ async def test_normal_prompt_flow_stt_llm_tts_playback_and_context(bundle_parts)
     event_types = {event.event_type for event in events}
     sequence = _event_sequence(telemetry)
     assert sequence.index(str(EventType.PROMPT_CAPTURE_ENDED)) < sequence.index(str(EventType.COMMAND_RECOGNITION_STARTED))
-    assert sequence.index(str(EventType.COMMAND_RECOGNITION_RESULT)) < sequence.index(str(EventType.STT_STARTED))
+    assert sequence.index(str(EventType.COMMAND_RECOGNITION_STARTED)) < sequence.index(str(EventType.STT_STARTED))
+    assert sequence.index(str(EventType.STT_RESULT)) < sequence.index(str(EventType.COMMAND_RECOGNITION_RESULT))
     assert str(EventType.WAKE_DETECTED) in event_types
     assert str(EventType.STT_RESULT) in event_types
     assert str(EventType.LLM_RESULT) in event_types
@@ -118,18 +119,21 @@ async def test_invalid_prompt_when_stt_returns_no_text(bundle_parts):
     assert any(call == ("play_sound_event", str(SoundEvent.INVALID_PROMPT)) for call in audio.calls)
     assert len(runtime.conversation.messages_for_llm()) == 1
 
+    command_event = str(SoundEvent.COMMAND_THINKING)
     thinking_event = str(SoundEvent.THINKING)
-    thinking_starts = _call_indices(audio.calls, ("loop_requested", thinking_event))
-    thinking_stops = _call_indices(audio.calls, ("loop_stop", thinking_event))
+    command_starts = _call_indices(audio.calls, ("loop_requested", command_event))
+    command_stops = _call_indices(audio.calls, ("loop_stop", command_event))
     invalid_prompt_start = _first_call_index(audio.calls, ("play_sound_event_start", str(SoundEvent.INVALID_PROMPT)))
 
-    assert len(thinking_starts) == 1
-    assert len(thinking_stops) == 1
-    assert thinking_starts[0] < _first_call_named(audio.calls, "stt_start")
-    assert _first_call_named(audio.calls, "stt_end") < thinking_stops[0] < invalid_prompt_start
+    assert len(command_starts) == 1
+    assert len(command_stops) == 1
+    assert command_starts[0] < _first_call_named(audio.calls, "stt_start")
+    assert _first_call_named(audio.calls, "stt_end") < command_stops[0] < invalid_prompt_start
+    assert _call_indices(audio.calls, ("loop_requested", thinking_event)) == []
+    assert _call_indices(audio.calls, ("loop_stop", thinking_event)) == []
 
 
-@pytest.mark.parametrize("phrase", ["stop", "cancel", "forget it", "never mind", " Stop. ", "CANCEL", "Never mind!"])
+@pytest.mark.parametrize("phrase", ["stop", "Stop.", "cancel", "Cancel.", "forget it", "Forget it.", "never mind", "Never mind!", " Stop. ", "CANCEL"])
 @pytest.mark.asyncio
 async def test_cancel_command_is_local_and_preserves_context(bundle_parts, phrase):
     store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
@@ -144,7 +148,7 @@ async def test_cancel_command_is_local_and_preserves_context(bundle_parts, phras
     assert runtime.state.state == RuntimeState.IDLE
     assert runtime.conversation.conversation_id == old_id
     assert runtime.conversation.messages_for_llm() == old_messages
-    assert stt.calls == []
+    assert stt.calls
     assert llm.messages == []
     assert tts.inputs == []
     assert any(call == ("play_sound_event", str(SoundEvent.CANCEL_ACCEPTED)) for call in audio.calls)
@@ -172,7 +176,7 @@ async def test_longer_prompts_with_command_words_are_not_local_commands(bundle_p
     assert not telemetry.query_events(event_type=str(EventType.COMMAND_ACCEPTED))
     result_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT))
     assert result_events[0].data["matched"] is False
-    assert result_events[0].data["route"] == "normal_stt"
+    assert result_events[0].data["route"] == "normal_llm"
 
 
 @pytest.mark.asyncio
@@ -220,8 +224,7 @@ async def test_llm_failure_stops_thinking_plays_failure_and_preserves_context(bu
 
     assert len(thinking_starts) == 1
     assert len(thinking_stops) == 1
-    assert thinking_starts[0] < _first_call_named(audio.calls, "stt_start")
-    assert _first_call_named(audio.calls, "stt_end") < _first_call_named(audio.calls, "llm_start")
+    assert _first_call_named(audio.calls, "stt_end") < thinking_starts[0] < _first_call_named(audio.calls, "llm_start")
     assert _first_call_named(audio.calls, "llm_error") < thinking_stops[0] < failure_start
 
 
@@ -264,7 +267,7 @@ async def test_barge_in_followed_by_cancel_is_handled_locally_without_second_llm
     await runtime.wait_until_idle()
 
     assert audio.stop_called is True
-    assert len(stt.calls) == 1
+    assert len(stt.calls) == 2
     assert len(llm.messages) == 1
     assert tts.inputs == ["first answer"]
     assert any(call == ("play_sound_event", str(SoundEvent.CANCEL_ACCEPTED)) for call in audio.calls)
@@ -287,7 +290,7 @@ async def test_wake_during_prompt_capture_is_not_valid_new_wake(bundle_parts):
 
 
 @pytest.mark.asyncio
-async def test_local_command_recognizer_runs_only_after_wake_and_prompt_capture(bundle_parts):
+async def test_stt_first_command_routing_runs_only_after_wake_and_prompt_capture(bundle_parts):
     store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
     assert telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_STARTED)) == []
     assert audio.calls == []
@@ -300,8 +303,9 @@ async def test_local_command_recognizer_runs_only_after_wake_and_prompt_capture(
     assert len(events) == 1
     prompt_start_index = [i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start"][0]
     prompt_end_index = [i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_end"][0]
-    assert prompt_start_index < prompt_end_index
-    assert stt.calls == []
+    stt_start_index = _first_call_named(audio.calls, "stt_start")
+    assert prompt_start_index < prompt_end_index < stt_start_index
+    assert stt.calls
 
 
 def _first_call_index(calls, expected):
@@ -386,9 +390,9 @@ async def test_normal_processing_thinking_is_single_continuous_loop_across_stt_l
 
     assert _call_indices(audio.calls, ("loop_requested", thinking_event)) == [thinking_start]
     assert _call_indices(audio.calls, ("loop_stop", thinking_event)) == [thinking_stop]
-    assert command_start < command_stop < thinking_start
-    assert thinking_start < _first_call_named(audio.calls, "stt_start")
-    assert _first_call_named(audio.calls, "stt_end") < _first_call_named(audio.calls, "llm_start")
+    assert command_start < _first_call_named(audio.calls, "stt_start")
+    assert _first_call_named(audio.calls, "stt_end") < command_stop < thinking_start
+    assert thinking_start < _first_call_named(audio.calls, "llm_start")
     assert _first_call_named(audio.calls, "llm_end") < _first_call_named(audio.calls, "tts_start")
     assert _first_call_named(audio.calls, "tts_end") < thinking_stop < playback_start
     assert thinking_stop > _first_call_named(audio.calls, "llm_start")
@@ -408,18 +412,21 @@ async def test_stt_error_stops_thinking_before_failure_sound(bundle_parts):
     await runtime.on_wake_detected(detection())
     await runtime.wait_until_idle()
 
+    command_event = str(SoundEvent.COMMAND_THINKING)
     thinking_event = str(SoundEvent.THINKING)
-    thinking_starts = _call_indices(audio.calls, ("loop_requested", thinking_event))
-    thinking_stops = _call_indices(audio.calls, ("loop_stop", thinking_event))
+    command_starts = _call_indices(audio.calls, ("loop_requested", command_event))
+    command_stops = _call_indices(audio.calls, ("loop_stop", command_event))
     failure_start = _first_call_index(audio.calls, ("play_sound_event_start", str(SoundEvent.STT_FAILURE)))
 
     assert runtime.state.state == RuntimeState.IDLE
     assert llm.messages == []
     assert tts.inputs == []
-    assert len(thinking_starts) == 1
-    assert len(thinking_stops) == 1
-    assert thinking_starts[0] < _first_call_named(audio.calls, "stt_start")
-    assert _first_call_named(audio.calls, "stt_error") < thinking_stops[0] < failure_start
+    assert len(command_starts) == 1
+    assert len(command_stops) == 1
+    assert command_starts[0] < _first_call_named(audio.calls, "stt_start")
+    assert _first_call_named(audio.calls, "stt_error") < command_stops[0] < failure_start
+    assert _call_indices(audio.calls, ("loop_requested", thinking_event)) == []
+    assert _call_indices(audio.calls, ("loop_stop", thinking_event)) == []
 
 
 @pytest.mark.asyncio
@@ -441,8 +448,7 @@ async def test_tts_failure_keeps_thinking_until_failure_sound(bundle_parts):
     assert runtime.state.state == RuntimeState.IDLE
     assert len(thinking_starts) == 1
     assert len(thinking_stops) == 1
-    assert thinking_starts[0] < _first_call_named(audio.calls, "stt_start")
-    assert _first_call_named(audio.calls, "stt_end") < _first_call_named(audio.calls, "llm_start")
+    assert _first_call_named(audio.calls, "stt_end") < thinking_starts[0] < _first_call_named(audio.calls, "llm_start")
     assert _first_call_named(audio.calls, "llm_end") < _first_call_named(audio.calls, "tts_start")
     assert _first_call_named(audio.calls, "tts_error") < thinking_stops[0] < failure_start
     assert not any(call[0] == "play_file" for call in audio.calls)
@@ -480,13 +486,15 @@ async def test_barge_in_during_processing_stops_normal_thinking(
     await runtime.on_wake_detected(detection())
     await runtime.wait_until_idle()
 
-    thinking_event = str(SoundEvent.THINKING)
-    thinking_start = _first_call_index(audio.calls, ("loop_requested", thinking_event))
-    thinking_stop = _first_call_index(audio.calls, ("loop_stop", thinking_event))
+    sound_event = str(SoundEvent.COMMAND_THINKING if phase == "stt" else SoundEvent.THINKING)
+    loop_start = _first_call_index(audio.calls, ("loop_requested", sound_event))
+    loop_stop = _first_call_index(audio.calls, ("loop_stop", sound_event))
     stop_all_index = _first_call_index(audio.calls, ("stop_all_playback", None))
 
     assert getattr(blocked_client, cancelled_attr) is True
-    assert thinking_start < stop_all_index < thinking_stop
+    assert loop_start < stop_all_index < loop_stop
+    if phase == "stt":
+        assert ("loop_requested", str(SoundEvent.THINKING)) not in audio.calls[:stop_all_index]
     assert len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION))]) == 1
     assert len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_ACK))]) == 1
     assert telemetry.query_events(event_type=str(EventType.BARGE_IN))
@@ -506,7 +514,7 @@ async def test_command_thinking_stops_before_command_acknowledgement(bundle_part
 
     assert command_stop < acknowledgement_start
     assert ("loop_requested", str(SoundEvent.THINKING)) not in audio.calls
-    assert stt.calls == []
+    assert stt.calls
 
 
 @pytest.mark.asyncio
@@ -521,7 +529,7 @@ async def test_empty_command_thinking_sound_keeps_command_processing_working(bun
     await runtime.wait_until_idle()
 
     assert runtime.state.state == RuntimeState.IDLE
-    assert stt.calls == []
+    assert stt.calls
     assert llm.messages == []
     assert any(call == ("play_sound_event", str(SoundEvent.CANCEL_ACCEPTED)) for call in audio.calls)
     result_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT))
@@ -529,10 +537,34 @@ async def test_empty_command_thinking_sound_keeps_command_processing_working(bun
 
 
 @pytest.mark.asyncio
-async def test_command_thinking_stops_when_command_recognition_fails_before_stt(bundle_parts):
+async def test_persisted_pocketsphinx_command_recognizer_config_does_not_block_stt_first_routing(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    cfg = store.get_saved().public_dict()
+    cfg["command_registry"]["recognizer"]["engine"] = "pocketsphinx"
+    cfg["command_registry"]["recognizer"]["pocketsphinx_command"] = ["definitely-missing-pocketsphinx"]
+    store.apply_config(cfg)
+    runtime.command_recognizer = RaisingCommandRecognizer()
+    audio.command_texts = ["Cancel."]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    assert runtime.state.state == RuntimeState.IDLE
+    assert len(stt.calls) == 1
+    assert llm.messages == []
+    assert tts.inputs == []
+    result_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT))
+    assert result_events[0].data["route"] == "local_command"
+    started_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_STARTED))
+    assert started_events[0].data["configured_legacy_recognizer_engine"] == "pocketsphinx"
+
+
+@pytest.mark.asyncio
+async def test_legacy_audio_command_recognizer_is_not_called_in_default_runtime_path(bundle_parts):
     store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
     runtime.command_recognizer = RaisingCommandRecognizer()
     stt.outputs = ["fallback prompt"]
+    llm.outputs = ["fallback response"]
 
     await runtime.on_wake_detected(detection())
     await runtime.wait_until_idle()
@@ -542,21 +574,23 @@ async def test_command_thinking_stops_when_command_recognition_fails_before_stt(
 
     assert command_stop < normal_thinking_start
     assert stt.calls
-    failure_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT), errors_only=True)
-    assert failure_events[0].data["sound_event"] == SoundEvent.COMMAND_THINKING.value
+    assert llm.messages[0][-1] == {"role": "user", "content": "fallback prompt"}
+    assert tts.inputs == ["fallback response"]
+    assert telemetry.query_events(errors_only=True) == []
+    result_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT))
+    assert result_events[0].data["route"] == "normal_llm"
 
 
 @pytest.mark.asyncio
-async def test_barge_in_during_command_interpretation_stops_command_thinking(bundle_parts):
+async def test_barge_in_during_command_routing_stt_stops_command_thinking(bundle_parts):
     store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
-    recognizer = SlowOnceCommandRecognizer()
-    runtime.command_recognizer = recognizer
+    stt.block_calls = 1
     stt.outputs = ["after barge in"]
     llm.outputs = ["after barge in response"]
 
     await runtime.on_wake_detected(detection())
-    await asyncio.wait_for(recognizer.started.wait(), timeout=3)
-    assert runtime.state.state == RuntimeState.CHECKING_COMMAND
+    await asyncio.wait_for(stt.started.wait(), timeout=3)
+    assert runtime.state.state == RuntimeState.PROCESSING_STT
 
     await runtime.on_wake_detected(detection())
     await runtime.wait_until_idle()
@@ -565,7 +599,7 @@ async def test_barge_in_during_command_interpretation_stops_command_thinking(bun
     command_stops = [i for i, call in enumerate(audio.calls) if call == ("loop_stop", str(SoundEvent.COMMAND_THINKING))]
     stop_all_index = _first_call_index(audio.calls, ("stop_all_playback", None))
 
-    assert recognizer.cancelled is True
+    assert stt.cancelled is True
     assert command_starts and command_stops
     assert command_starts[0] < stop_all_index < command_stops[0]
     assert telemetry.query_events(event_type=str(EventType.BARGE_IN))

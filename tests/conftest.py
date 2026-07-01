@@ -156,7 +156,11 @@ class FakeSTT:
             if self.trace is not None:
                 self.trace.append(("stt_error", str(self.exc)))
             raise self.exc
-        transcript = self.outputs.pop(0) if self.outputs else ""
+        sidecar = Path(str(wav_path) + ".command.txt")
+        if sidecar.exists():
+            transcript = sidecar.read_text(encoding="utf-8")
+        else:
+            transcript = self.outputs.pop(0) if self.outputs else ""
         if self.trace is not None:
             self.trace.append(("stt_end", transcript))
         return transcript

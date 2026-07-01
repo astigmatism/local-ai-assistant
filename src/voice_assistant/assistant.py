@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import time
 import uuid
-from pathlib import Path
 from typing import Callable
 
 from .audio import AudioController, CaptureResult, LoopingSoundHandle
@@ -17,7 +16,7 @@ from .clients import (
     ServiceError,
     TTSClient,
 )
-from .commands import CommandMatch, CommandRegistry, LocalCommandRecognizer, build_command_recognizer
+from .commands import CommandMatch, CommandRegistry, LocalCommandRecognizer
 from .config import AssistantConfig, ConfigStore
 from .constants import ArtifactKind, CommandIntent, EventType, RuntimeState, SoundEvent
 from .conversation import ConversationManager
@@ -48,7 +47,9 @@ class AssistantRuntime:
         self.telemetry = telemetry
         cfg = self.config_store.get_active()
         self.audio = audio or AudioController()
-        self.command_recognizer = command_recognizer or build_command_recognizer(cfg.command_registry)
+        # Retained for backwards-compatible injection/diagnostics only; the default runtime
+        # command path now routes through configured STT and CommandRegistry.match_text.
+        self.command_recognizer = command_recognizer
         self.wake_engine = wake_engine or build_wake_engine(cfg)
         self.stt_factory = stt_factory or (lambda c: STTClient(c.services.stt))
         self.llm_factory = llm_factory or (lambda c: LLMClient(c.services.llm))
@@ -409,79 +410,208 @@ class AssistantRuntime:
         self.state.set_state(RuntimeState.CHECKING_COMMAND, interaction_id=interaction_id, conversation_id=conversation_id)
         self.telemetry.log_event(
             EventType.COMMAND_RECOGNITION_STARTED,
-            "Local command recognition started.",
+            "STT-first local command routing started.",
             state=RuntimeState.CHECKING_COMMAND.value,
             conversation_id=conversation_id,
             interaction_id=interaction_id,
-            component="local_command_recognizer",
-            data={"sound_event": SoundEvent.COMMAND_THINKING.value},
+            component="command_router",
+            stage="command_routing",
+            data={
+                "routing_mode": "stt_first",
+                "sound_event": SoundEvent.COMMAND_THINKING.value,
+                "configured_legacy_recognizer_engine": cfg.command_registry.recognizer.engine,
+            },
         )
-        command = await self._recognize_command_with_feedback(cfg, capture, interaction_id, conversation_id)
+
+        try:
+            transcript = await self._transcribe_for_command_routing_with_feedback(
+                cfg,
+                capture,
+                interaction_id,
+                conversation_id,
+            )
+        except asyncio.TimeoutError as exc:
+            await self._handle_command_routing_stt_failure(cfg, interaction_id, conversation_id, exc)
+            return
+        except ServiceAuthError as exc:
+            await self._handle_command_routing_stt_failure(cfg, interaction_id, conversation_id, exc)
+            return
+        except NetworkServiceError as exc:
+            await self._handle_command_routing_stt_failure(cfg, interaction_id, conversation_id, exc)
+            return
+        except MalformedServiceResponse as exc:
+            await self._handle_command_routing_stt_failure(cfg, interaction_id, conversation_id, exc)
+            return
+        except ServiceError as exc:
+            await self._handle_command_routing_stt_failure(cfg, interaction_id, conversation_id, exc)
+            return
+
+        self.state.set_state(RuntimeState.CHECKING_COMMAND, interaction_id=interaction_id, conversation_id=conversation_id)
+        if not transcript.strip():
+            self._log_command_match_result(
+                transcript,
+                None,
+                interaction_id,
+                conversation_id,
+                route="invalid_prompt",
+                success=False,
+                human_message="STT-first command routing found no transcript to match.",
+            )
+            await self.audio.play_sound_event(cfg, SoundEvent.INVALID_PROMPT, cancel_event=cancel_event)
+            self.state.set_state(RuntimeState.IDLE, interaction_id=interaction_id, conversation_id=conversation_id)
+            return
+
+        registry = CommandRegistry(cfg.command_registry)
+        command = registry.match_text(transcript)
+        self._log_command_match_result(transcript, command, interaction_id, conversation_id)
         if command:
             await self._handle_command(command, cfg, interaction_id, conversation_id)
             return
-        await self._process_prompt(capture, cfg, interaction_id, conversation_id)
+        await self._process_transcribed_prompt(transcript, cfg, interaction_id, conversation_id)
 
-    async def _recognize_command_with_feedback(
+    async def _transcribe_for_command_routing_with_feedback(
         self,
         cfg: AssistantConfig,
         capture: CaptureResult,
         interaction_id: str,
         conversation_id: str,
-    ) -> CommandMatch | None:
+    ) -> str:
         command_thinking: LoopingSoundHandle | None = self.audio.start_looping_sound(cfg, SoundEvent.COMMAND_THINKING)
+        started = time.monotonic()
         try:
-            return await self._recognize_command_safely(cfg, capture, interaction_id, conversation_id)
+            self.state.set_state(RuntimeState.PROCESSING_STT, interaction_id=interaction_id, conversation_id=conversation_id)
+            self.telemetry.log_event(
+                EventType.STT_STARTED,
+                "STT request started for command routing.",
+                state=RuntimeState.PROCESSING_STT.value,
+                conversation_id=conversation_id,
+                interaction_id=interaction_id,
+                component="stt",
+                stage="command_routing",
+                data={"routing_mode": "stt_first", "sound_event": SoundEvent.COMMAND_THINKING.value},
+            )
+            transcript = await self.stt_factory(cfg).transcribe(capture.path)
+            stt_duration_ms = (time.monotonic() - started) * 1000
+            if not transcript:
+                self.telemetry.log_event(
+                    EventType.STT_RESULT,
+                    "STT returned no text during command routing; prompt is invalid.",
+                    state=RuntimeState.PROCESSING_STT.value,
+                    conversation_id=conversation_id,
+                    interaction_id=interaction_id,
+                    component="stt",
+                    stage="command_routing",
+                    success=False,
+                    duration_ms=stt_duration_ms,
+                    data={"transcript": "", "routing_mode": "stt_first", "route": "invalid_prompt"},
+                )
+                return ""
+            self.telemetry.log_event(
+                EventType.STT_RESULT,
+                "STT returned transcript for command routing.",
+                state=RuntimeState.PROCESSING_STT.value,
+                conversation_id=conversation_id,
+                interaction_id=interaction_id,
+                component="stt",
+                stage="command_routing",
+                success=True,
+                duration_ms=stt_duration_ms,
+                data={"transcript": transcript, "routing_mode": "stt_first"},
+            )
+            return transcript
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            stt_duration_ms = (time.monotonic() - started) * 1000
+            self.telemetry.log_event(
+                EventType.STT_RESULT,
+                "STT failed during command routing.",
+                state=RuntimeState.PROCESSING_STT.value,
+                conversation_id=conversation_id,
+                interaction_id=interaction_id,
+                component="stt",
+                stage="command_routing",
+                success=False,
+                error=str(exc),
+                duration_ms=stt_duration_ms,
+                data={"transcript": "", "routing_mode": "stt_first", "route": "stt_failure"},
+            )
+            raise
         finally:
             if command_thinking:
                 await command_thinking.stop()
 
-    async def _recognize_command_safely(
+    async def _handle_command_routing_stt_failure(
         self,
         cfg: AssistantConfig,
-        capture: CaptureResult,
         interaction_id: str,
         conversation_id: str,
-    ) -> CommandMatch | None:
-        registry = CommandRegistry(cfg.command_registry)
-        try:
-            command = await self.command_recognizer.recognize(capture.path, registry)
-        except Exception as exc:
-            diagnostics = getattr(self.command_recognizer, "last_diagnostics", None)
-            data = {"sound_event": SoundEvent.COMMAND_THINKING.value, "route": "normal_stt"}
-            if isinstance(diagnostics, dict):
-                data["recognizer_diagnostics"] = diagnostics
-            self.telemetry.log_event(
-                EventType.COMMAND_RECOGNITION_RESULT,
-                "Local command recognizer failed; continuing to normal STT pipeline.",
-                state=RuntimeState.CHECKING_COMMAND.value,
-                conversation_id=conversation_id,
-                interaction_id=interaction_id,
-                component="local_command_recognizer",
-                success=False,
-                error=str(exc),
-                data=data,
-            )
-            return None
-        diagnostics = getattr(self.command_recognizer, "last_diagnostics", None)
+        error: BaseException,
+    ) -> None:
         self.telemetry.log_event(
             EventType.COMMAND_RECOGNITION_RESULT,
-            "Local command recognition completed.",
+            "STT-first command routing failed before command matching.",
+            state=RuntimeState.PROCESSING_STT.value,
+            conversation_id=conversation_id,
+            interaction_id=interaction_id,
+            component="command_router",
+            stage="command_routing",
+            success=False,
+            error=str(error),
+            data={
+                "routing_mode": "stt_first",
+                "matched": False,
+                "alias": None,
+                "route": "stt_failure",
+                "sound_event": SoundEvent.COMMAND_THINKING.value,
+            },
+        )
+        await self._handle_failure(
+            cfg,
+            interaction_id=interaction_id,
+            conversation_id=conversation_id,
+            event_type=EventType.FAILURE,
+            sound_event=self._sound_for_service_exception(error, fallback=SoundEvent.STT_FAILURE),
+            component=self._component_for_service_exception(error, fallback="stt"),
+            message=self._message_for_service_exception(error, fallback="STT failure."),
+            error=error,
+        )
+
+    def _log_command_match_result(
+        self,
+        transcript: str,
+        command: CommandMatch | None,
+        interaction_id: str,
+        conversation_id: str,
+        *,
+        route: str | None = None,
+        success: bool = True,
+        human_message: str = "STT-first local command routing completed.",
+    ) -> None:
+        registry = CommandRegistry(self.config_store.get_active().command_registry)
+        normalized_transcript = registry.normalize(transcript)
+        resolved_route = route or ("local_command" if command else "normal_llm")
+        self.telemetry.log_event(
+            EventType.COMMAND_RECOGNITION_RESULT,
+            human_message,
             state=RuntimeState.CHECKING_COMMAND.value,
             conversation_id=conversation_id,
             interaction_id=interaction_id,
-            component="local_command_recognizer",
+            component="command_router",
+            stage="command_routing",
             command_intent=command.intent if command else None,
-            success=True,
+            success=success,
             data={
+                "routing_mode": "stt_first",
                 "matched": bool(command),
+                "intent": command.intent if command else None,
                 "alias": command.alias if command else None,
+                "transcript": transcript,
+                "normalized_transcript": normalized_transcript,
                 "sound_event": SoundEvent.COMMAND_THINKING.value,
-                "route": "local_command" if command else "normal_stt",
-                "recognizer_diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
+                "route": resolved_route,
             },
         )
-        return command
 
     async def _handle_command(self, command: CommandMatch, cfg: AssistantConfig, interaction_id: str, conversation_id: str) -> None:
         registry = CommandRegistry(cfg.command_registry)
@@ -493,10 +623,11 @@ class AssistantRuntime:
             state=RuntimeState.CHECKING_COMMAND.value,
             conversation_id=conversation_id,
             interaction_id=interaction_id,
-            component="local_command_recognizer",
+            component="command_router",
+            stage="command_routing",
             command_intent=command.intent,
             success=True,
-            data={"alias": command.alias, "transcript": command.transcript},
+            data={"alias": command.alias, "transcript": command.transcript, "routing_mode": "stt_first"},
         )
         await self.audio.play_sound_event(cfg, sound_event, cancel_event=self._active_cancel_event)
         if command.intent == CommandIntent.CANCEL_STOP.value:
@@ -529,7 +660,7 @@ class AssistantRuntime:
             return
         raise RuntimeError(f"Unsupported command intent in v1 registry: {command.intent}")
 
-    async def _process_prompt(self, capture: CaptureResult, cfg: AssistantConfig, interaction_id: str, conversation_id: str) -> None:
+    async def _process_transcribed_prompt(self, transcript: str, cfg: AssistantConfig, interaction_id: str, conversation_id: str) -> None:
         cancel_event = self._active_cancel_event or asyncio.Event()
         thinking: LoopingSoundHandle | None = None
 
@@ -540,56 +671,34 @@ class AssistantRuntime:
                 thinking = None
 
         try:
-            self.state.set_state(RuntimeState.PROCESSING_STT, interaction_id=interaction_id, conversation_id=conversation_id)
-            self.telemetry.log_event(EventType.STT_STARTED, "STT request started.", state=RuntimeState.PROCESSING_STT.value, conversation_id=conversation_id, interaction_id=interaction_id, component="stt")
-            thinking = self.audio.start_looping_sound(cfg, SoundEvent.THINKING)
-            started = time.monotonic()
-            transcript = await self.stt_factory(cfg).transcribe(capture.path)
-            stt_duration_ms = (time.monotonic() - started) * 1000
-            if not transcript:
-                await stop_processing_feedback()
-                self.telemetry.log_event(
-                    EventType.STT_RESULT,
-                    "STT returned no text; prompt is invalid.",
-                    state=RuntimeState.PROCESSING_STT.value,
-                    conversation_id=conversation_id,
-                    interaction_id=interaction_id,
-                    component="stt",
-                    success=False,
-                    duration_ms=stt_duration_ms,
-                    data={"transcript": ""},
-                )
-                await self.audio.play_sound_event(cfg, SoundEvent.INVALID_PROMPT, cancel_event=cancel_event)
-                self.state.set_state(RuntimeState.IDLE, interaction_id=interaction_id, conversation_id=conversation_id)
-                return
-            self.telemetry.log_event(
-                EventType.STT_RESULT,
-                "STT returned transcript.",
-                state=RuntimeState.PROCESSING_STT.value,
-                conversation_id=conversation_id,
-                interaction_id=interaction_id,
-                component="stt",
-                success=True,
-                duration_ms=stt_duration_ms,
-                data={"transcript": transcript},
-            )
             self.telemetry.log_event(
                 EventType.PROMPT_ACCEPTED,
-                "Prompt accepted because STT returned text.",
-                state=RuntimeState.PROCESSING_STT.value,
+                "Prompt accepted because STT returned non-command text.",
+                state=RuntimeState.CHECKING_COMMAND.value,
                 conversation_id=conversation_id,
                 interaction_id=interaction_id,
-                component="stt",
+                component="command_router",
+                stage="command_routing",
                 success=True,
                 data={
                     "sound_event": SoundEvent.PROMPT_ACCEPTED.value,
                     "sound_playback": "suppressed_during_processing_feedback",
+                    "routing_mode": "stt_first",
+                    "route": "normal_llm",
                 },
             )
 
             self.conversation.add_user(transcript)
             self.state.set_state(RuntimeState.PROCESSING_LLM, interaction_id=interaction_id, conversation_id=conversation_id)
-            self.telemetry.log_event(EventType.LLM_STARTED, "LLM request started.", state=RuntimeState.PROCESSING_LLM.value, conversation_id=conversation_id, interaction_id=interaction_id, component="llm")
+            thinking = self.audio.start_looping_sound(cfg, SoundEvent.THINKING)
+            self.telemetry.log_event(
+                EventType.LLM_STARTED,
+                "LLM request started.",
+                state=RuntimeState.PROCESSING_LLM.value,
+                conversation_id=conversation_id,
+                interaction_id=interaction_id,
+                component="llm",
+            )
             started = time.monotonic()
             llm_text = await self.llm_factory(cfg).chat(self.conversation.messages_for_llm())
             llm_duration_ms = (time.monotonic() - started) * 1000
@@ -675,9 +784,7 @@ class AssistantRuntime:
             component = "service"
             sound = SoundEvent.INTERNAL_FAILURE
             text = str(exc).lower()
-            if "stt" in text:
-                component, sound = "stt", SoundEvent.STT_FAILURE
-            elif "llm" in text:
+            if "llm" in text:
                 component, sound = "llm", SoundEvent.LLM_FAILURE
             elif "tts" in text:
                 component, sound = "tts", SoundEvent.TTS_FAILURE
@@ -685,6 +792,54 @@ class AssistantRuntime:
         except Exception:
             await stop_processing_feedback()
             raise
+
+    def _component_for_service_exception(self, error: BaseException, *, fallback: str) -> str:
+        if isinstance(error, ServiceAuthError):
+            return "auth"
+        if isinstance(error, NetworkServiceError):
+            return "network"
+        if isinstance(error, MalformedServiceResponse):
+            return "service"
+        if isinstance(error, ServiceError):
+            text = str(error).lower()
+            if "stt" in text:
+                return "stt"
+            if "llm" in text:
+                return "llm"
+            if "tts" in text:
+                return "tts"
+            return "service"
+        return fallback
+
+    def _sound_for_service_exception(self, error: BaseException, *, fallback: SoundEvent) -> SoundEvent:
+        if isinstance(error, (ServiceAuthError, NetworkServiceError)):
+            return SoundEvent.NETWORK_FAILURE
+        if isinstance(error, MalformedServiceResponse):
+            return SoundEvent.INTERNAL_FAILURE
+        if isinstance(error, ServiceError):
+            text = str(error).lower()
+            if "stt" in text:
+                return SoundEvent.STT_FAILURE
+            if "llm" in text:
+                return SoundEvent.LLM_FAILURE
+            if "tts" in text:
+                return SoundEvent.TTS_FAILURE
+            return SoundEvent.INTERNAL_FAILURE
+        return fallback
+
+    def _message_for_service_exception(self, error: BaseException, *, fallback: str) -> str:
+        if isinstance(error, ServiceAuthError):
+            return "Service authentication failure."
+        if isinstance(error, NetworkServiceError):
+            return "Network/service failure."
+        if isinstance(error, MalformedServiceResponse):
+            return "Malformed downstream service response."
+        if isinstance(error, ServiceError):
+            component = self._component_for_service_exception(error, fallback="service")
+            return f"{component.upper()} failure."
+        if isinstance(error, asyncio.TimeoutError):
+            return "STT timeout."
+        return fallback
 
     async def _handle_failure(
         self,
@@ -755,7 +910,7 @@ class AssistantRuntime:
 
     async def reload_runtime_components(self) -> None:
         cfg = self.config_store.get_active()
-        self.command_recognizer = build_command_recognizer(cfg.command_registry)
+        self.command_recognizer = None
         self._refresh_conversation_config(cfg)
         if self._wake_task and not self._wake_task.done():
             self._wake_stop_event.set()

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -127,27 +126,24 @@ class HealthChecker:
         return HealthItem("wake-word runtime", True, "wake listener task is running with a production engine")
 
     async def check_command_recognizer(self) -> HealthItem:
-        recognizer = self.cfg.command_registry.recognizer
-        if recognizer.engine == "pocketsphinx":
-            executable = recognizer.pocketsphinx_command[0] if recognizer.pocketsphinx_command else "pocketsphinx_continuous"
-            if Path(executable).name == executable and shutil.which(executable) is None:
-                return HealthItem("local command recognizer", False, f"{executable} is not installed", "error")
-            if not Path(recognizer.pocketsphinx_hmm_path).is_dir():
-                return HealthItem("local command recognizer", False, f"PocketSphinx HMM path is missing: {recognizer.pocketsphinx_hmm_path}", "error")
-            if not Path(recognizer.pocketsphinx_dict_path).is_file():
-                return HealthItem("local command recognizer", False, f"PocketSphinx dictionary is missing: {recognizer.pocketsphinx_dict_path}", "error")
-            if recognizer.pocketsphinx_lm_path and not Path(recognizer.pocketsphinx_lm_path).is_file():
-                return HealthItem("local command recognizer", False, f"PocketSphinx language model is missing: {recognizer.pocketsphinx_lm_path}", "error")
-            return HealthItem("local command recognizer", True, "PocketSphinx local command audio recognizer available")
-        if recognizer.engine == "vosk":
-            if not recognizer.vosk_model_path:
-                return HealthItem("local command recognizer", False, "Vosk model path is not configured", "error")
-            try:
-                import vosk  # type: ignore  # noqa: F401
-                return HealthItem("local command recognizer", True, "Vosk import available")
-            except Exception as exc:
-                return HealthItem("local command recognizer", False, f"Vosk unavailable: {exc}", "error")
-        return HealthItem("local command recognizer", True, "configured text recognizer available for tests/diagnostics")
+        enabled = [command for command in self.cfg.command_registry.commands if command.enabled]
+        alias_count = sum(len(command.aliases) for command in enabled)
+        if not enabled or alias_count == 0:
+            return HealthItem(
+                "local command recognizer",
+                False,
+                "STT-first command routing is active, but no enabled local command aliases are configured",
+                "warning",
+            )
+        return HealthItem(
+            "local command recognizer",
+            True,
+            (
+                "STT-first command routing is active: configured STT transcribes prompts before "
+                f"whole-utterance matching across {len(enabled)} enabled command(s) and {alias_count} alias(es). "
+                "command_registry.recognizer is retained for diagnostics/backward compatibility and is not required for cancel/stop routing."
+            ),
+        )
 
     async def check_capture_device(self) -> HealthItem:
         code, output = await _run_command(["arecord", "-l"])
