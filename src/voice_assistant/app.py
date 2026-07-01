@@ -484,7 +484,7 @@ function renderTtsVoiceOptions(data){
   ttsVoiceState.soundDirectory = data.generated_tts_sound_directory || '';
   writeText('ttsGeneratedSoundDirectory', ttsVoiceState.soundDirectory || 'not loaded');
   const phrasesBox = document.getElementById('ttsGeneratedPhrases');
-  if(phrasesBox && Array.isArray(data.generated_tts_phrases) && !phrasesBox.value.trim()){ phrasesBox.value = data.generated_tts_phrases.join('\n'); }
+  if(phrasesBox && Array.isArray(data.generated_tts_phrases) && !phrasesBox.value.trim()){ phrasesBox.value = data.generated_tts_phrases.join('\\n'); }
   renderTtsGeneratedSoundPreview();
   const select = document.getElementById('ttsVoiceSelect');
   if(!select){ return; }

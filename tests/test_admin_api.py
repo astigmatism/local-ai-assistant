@@ -519,6 +519,8 @@ def test_tts_voice_ui_wires_selection_sample_test_and_apply_controls(bundle_part
     assert "readyForApply = Boolean(selected && ttsGeneratedPhrases().length > 0 && !ttsVoiceState.busy)" in script
     assert "function ttsGeneratedPhrases()" in script
     assert r"split(/\r?\n/)" in script
+    assert r"generated_tts_phrases.join('\n')" in script
+    assert "generated_tts_phrases.join('" + "\n" + "')" not in script
     assert "function renderTtsGeneratedSoundPreview()" in script
     assert "function ttsPhraseOutputFilename(phrase)" in script
     assert "async function testTtsVoice()" in script
