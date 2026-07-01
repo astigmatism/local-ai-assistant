@@ -23,7 +23,26 @@ def test_default_configuration_matches_design_inventory(tmp_path):
     assert cfg.sounds.event_files[SoundEvent.WAKE_NEW_CONVERSATION] == cfg.sounds.event_files[SoundEvent.WAKE_ACK]
     assert SoundEvent.COMMAND_THINKING.value == "command_thinking"
     assert SoundEvent.WAKE_NEW_CONVERSATION.value == "wake_new_conversation"
+    assert cfg.command_registry.recognizer.engine == "pocketsphinx"
+    assert cfg.command_registry.recognizer.pocketsphinx_command == ["pocketsphinx_continuous"]
 
+
+
+def test_legacy_configured_text_command_recognizer_is_migrated_to_local_audio_default(tmp_path):
+    config_path = tmp_path / "config.json"
+    data = AssistantConfig().public_dict()
+    data["command_registry"]["recognizer"] = {
+        "engine": "configured_text",
+        "vosk_model_path": None,
+        "confidence_threshold": 0.7,
+    }
+    ConfigStore._write_json(config_path, data)
+
+    store = ConfigStore(config_path)
+
+    assert store.get_saved().command_registry.recognizer.engine == "pocketsphinx"
+    reloaded = ConfigStore(config_path)
+    assert reloaded.get_saved().command_registry.recognizer.engine == "pocketsphinx"
 
 
 def test_command_thinking_sound_can_be_configured_independently():

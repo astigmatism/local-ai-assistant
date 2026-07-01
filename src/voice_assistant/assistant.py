@@ -456,7 +456,7 @@ class AssistantRuntime:
                 component="local_command_recognizer",
                 success=False,
                 error=str(exc),
-                data={"sound_event": SoundEvent.COMMAND_THINKING.value},
+                data={"sound_event": SoundEvent.COMMAND_THINKING.value, "route": "normal_stt"},
             )
             return None
         self.telemetry.log_event(
@@ -468,7 +468,12 @@ class AssistantRuntime:
             component="local_command_recognizer",
             command_intent=command.intent if command else None,
             success=True,
-            data={"matched": bool(command), "alias": command.alias if command else None, "sound_event": SoundEvent.COMMAND_THINKING.value},
+            data={
+                "matched": bool(command),
+                "alias": command.alias if command else None,
+                "sound_event": SoundEvent.COMMAND_THINKING.value,
+                "route": "local_command" if command else "normal_stt",
+            },
         )
         return command
 

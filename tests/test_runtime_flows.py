@@ -37,6 +37,9 @@ async def test_normal_prompt_flow_stt_llm_tts_playback_and_context(bundle_parts)
     assert thinking_stop_index < playback_index
     events = telemetry.query_events()
     event_types = {event.event_type for event in events}
+    sequence = _event_sequence(telemetry)
+    assert sequence.index(str(EventType.PROMPT_CAPTURE_ENDED)) < sequence.index(str(EventType.COMMAND_RECOGNITION_STARTED))
+    assert sequence.index(str(EventType.COMMAND_RECOGNITION_RESULT)) < sequence.index(str(EventType.STT_STARTED))
     assert str(EventType.WAKE_DETECTED) in event_types
     assert str(EventType.STT_RESULT) in event_types
     assert str(EventType.LLM_RESULT) in event_types
@@ -126,21 +129,50 @@ async def test_invalid_prompt_when_stt_returns_no_text(bundle_parts):
     assert _first_call_named(audio.calls, "stt_end") < thinking_stops[0] < invalid_prompt_start
 
 
+@pytest.mark.parametrize("phrase", ["stop", "cancel", "forget it", "never mind", " Stop. ", "CANCEL", "Never mind!"])
 @pytest.mark.asyncio
-async def test_cancel_command_is_local_and_preserves_context(bundle_parts):
+async def test_cancel_command_is_local_and_preserves_context(bundle_parts, phrase):
     store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
     runtime.conversation.add_user("previous")
     old_id = runtime.conversation.conversation_id
-    audio.command_texts = ["stop"]
+    old_messages = list(runtime.conversation.messages_for_llm())
+    audio.command_texts = [phrase]
 
     await runtime.on_wake_detected(detection())
     await runtime.wait_until_idle()
 
+    assert runtime.state.state == RuntimeState.IDLE
     assert runtime.conversation.conversation_id == old_id
+    assert runtime.conversation.messages_for_llm() == old_messages
     assert stt.calls == []
+    assert llm.messages == []
+    assert tts.inputs == []
     assert any(call == ("play_sound_event", str(SoundEvent.CANCEL_ACCEPTED)) for call in audio.calls)
     command_events = telemetry.query_events(event_type=str(EventType.COMMAND_ACCEPTED))
     assert command_events[0].command_intent == "cancel_stop"
+    result_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT))
+    assert result_events[0].data["matched"] is True
+    assert result_events[0].data["route"] == "local_command"
+
+
+@pytest.mark.parametrize("phrase", ["How do I stop a Linux service?", "How do I cancel a process in Linux?"])
+@pytest.mark.asyncio
+async def test_longer_prompts_with_command_words_are_not_local_commands(bundle_parts, phrase):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = [phrase]
+    stt.outputs = [phrase]
+    llm.outputs = ["normal answer"]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    assert stt.calls
+    assert llm.messages[0][-1] == {"role": "user", "content": phrase}
+    assert tts.inputs == ["normal answer"]
+    assert not telemetry.query_events(event_type=str(EventType.COMMAND_ACCEPTED))
+    result_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT))
+    assert result_events[0].data["matched"] is False
+    assert result_events[0].data["route"] == "normal_stt"
 
 
 @pytest.mark.asyncio
@@ -214,6 +246,32 @@ async def test_barge_in_during_playback_cancels_and_starts_new_capture(bundle_pa
     assert len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_ACK))]) == 1
     events = telemetry.query_events(event_type=str(EventType.BARGE_IN))
     assert events and "cancelling" in events[0].human_message
+
+
+@pytest.mark.asyncio
+async def test_barge_in_followed_by_cancel_is_handled_locally_without_second_llm_request(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = [None, "cancel"]
+    stt.outputs = ["first prompt"]
+    llm.outputs = ["first answer"]
+    audio.block_playback = True
+
+    await runtime.on_wake_detected(detection())
+    await asyncio.wait_for(audio.playback_started.wait(), timeout=3)
+    assert runtime.state.state == RuntimeState.PLAYING_RESPONSE
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    assert audio.stop_called is True
+    assert len(stt.calls) == 1
+    assert len(llm.messages) == 1
+    assert tts.inputs == ["first answer"]
+    assert any(call == ("play_sound_event", str(SoundEvent.CANCEL_ACCEPTED)) for call in audio.calls)
+    assert telemetry.query_events(event_type=str(EventType.BARGE_IN))
+    command_events = telemetry.query_events(event_type=str(EventType.COMMAND_ACCEPTED))
+    assert command_events[0].command_intent == "cancel_stop"
+    assert runtime.state.state == RuntimeState.IDLE
 
 
 @pytest.mark.asyncio
@@ -449,6 +507,25 @@ async def test_command_thinking_stops_before_command_acknowledgement(bundle_part
     assert command_stop < acknowledgement_start
     assert ("loop_requested", str(SoundEvent.THINKING)) not in audio.calls
     assert stt.calls == []
+
+
+@pytest.mark.asyncio
+async def test_empty_command_thinking_sound_keeps_command_processing_working(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    cfg = store.get_saved().public_dict()
+    cfg["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] = ""
+    store.apply_config(cfg)
+    audio.command_texts = ["stop"]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    assert runtime.state.state == RuntimeState.IDLE
+    assert stt.calls == []
+    assert llm.messages == []
+    assert any(call == ("play_sound_event", str(SoundEvent.CANCEL_ACCEPTED)) for call in audio.calls)
+    result_events = telemetry.query_events(event_type=str(EventType.COMMAND_RECOGNITION_RESULT))
+    assert result_events[0].data["route"] == "local_command"
 
 
 @pytest.mark.asyncio

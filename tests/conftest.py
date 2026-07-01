@@ -249,6 +249,7 @@ def bundle_parts(tmp_path, monkeypatch):
     cfg["storage"]["artifacts_dir"] = str(tmp_path / "artifacts")
     cfg["storage"]["telemetry_db_path"] = str(tmp_path / "telemetry.sqlite3")
     cfg["sounds"]["library_dir"] = str(tmp_path / "sounds")
+    cfg["command_registry"]["recognizer"]["engine"] = "configured_text"
     os.makedirs(cfg["sounds"]["library_dir"], exist_ok=True)
     configured_sound_names = []
     for value in cfg["sounds"]["event_files"].values():

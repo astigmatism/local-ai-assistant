@@ -21,6 +21,10 @@ RESTART_REQUIRED_PREFIXES = {
 DEFAULT_WAKE_PHRASE = "Rosalina"
 DEFAULT_PRODUCTION_WAKE_COMMAND = ["python", "-m", "voice_assistant.pocketsphinx_wake"]
 DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND = [*DEFAULT_PRODUCTION_WAKE_COMMAND, "--self-test"]
+DEFAULT_POCKETSPHINX_COMMAND = ["pocketsphinx_continuous"]
+DEFAULT_POCKETSPHINX_HMM_PATH = "/usr/share/pocketsphinx/model/en-us/en-us"
+DEFAULT_POCKETSPHINX_DICT_PATH = "/usr/share/pocketsphinx/model/en-us/cmudict-en-us.dict"
+DEFAULT_POCKETSPHINX_LM_PATH = "/usr/share/pocketsphinx/model/en-us/en-us.lm.bin"
 
 
 class WakeConfig(BaseModel):
@@ -101,9 +105,30 @@ class CommandDefinition(BaseModel):
 
 
 class CommandRecognizerConfig(BaseModel):
-    engine: Literal["configured_text", "vosk"] = "configured_text"
+    engine: Literal["configured_text", "pocketsphinx", "vosk"] = "pocketsphinx"
     vosk_model_path: str | None = None
     confidence_threshold: float = Field(0.70, ge=0.0, le=1.0)
+    pocketsphinx_command: list[str] = Field(default_factory=lambda: list(DEFAULT_POCKETSPHINX_COMMAND))
+    pocketsphinx_hmm_path: str = DEFAULT_POCKETSPHINX_HMM_PATH
+    pocketsphinx_dict_path: str = DEFAULT_POCKETSPHINX_DICT_PATH
+    pocketsphinx_lm_path: str | None = DEFAULT_POCKETSPHINX_LM_PATH
+    pocketsphinx_timeout_seconds: float = Field(6.0, gt=0.0)
+
+    @field_validator("pocketsphinx_command")
+    @classmethod
+    def pocketsphinx_command_items_non_empty(cls, value: list[str]) -> list[str]:
+        cleaned = [item for item in value if item and item.strip()]
+        if not cleaned:
+            raise ValueError("pocketsphinx_command must include at least one executable item")
+        return cleaned
+
+    @field_validator("pocketsphinx_hmm_path", "pocketsphinx_dict_path")
+    @classmethod
+    def pocketsphinx_paths_non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("PocketSphinx command recognizer paths must not be empty")
+        return value
 
 
 SoundEventFileValue: TypeAlias = str | list[str]
@@ -422,6 +447,27 @@ def migrate_legacy_default_wake_phrase(config: AssistantConfig) -> AssistantConf
     return config
 
 
+def migrate_legacy_configured_text_command_recognizer(config: AssistantConfig, raw_data: dict[str, Any] | None = None) -> AssistantConfig:
+    """Upgrade old persisted default command recognizers to a production local-audio recognizer."""
+
+    raw_recognizer = {}
+    if isinstance(raw_data, dict):
+        raw_registry = raw_data.get("command_registry")
+        if isinstance(raw_registry, dict) and isinstance(raw_registry.get("recognizer"), dict):
+            raw_recognizer = dict(raw_registry["recognizer"])
+    legacy_keys = {"engine", "vosk_model_path", "confidence_threshold"}
+    is_legacy_configured_text = (
+        raw_recognizer.get("engine") == "configured_text"
+        and set(raw_recognizer).issubset(legacy_keys)
+    )
+    if not is_legacy_configured_text:
+        return config
+
+    data = config.public_dict()
+    data["command_registry"]["recognizer"]["engine"] = "pocketsphinx"
+    return AssistantConfig.model_validate(data)
+
+
 class ConfigStore:
     """Stores default, saved, active, and draft configuration.
 
@@ -449,7 +495,8 @@ class ConfigStore:
         with self.config_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
         self._loaded_saved_data = copy.deepcopy(data)
-        return migrate_legacy_default_wake_phrase(AssistantConfig.model_validate(data))
+        loaded = migrate_legacy_default_wake_phrase(AssistantConfig.model_validate(data))
+        return migrate_legacy_configured_text_command_recognizer(loaded, data)
 
     @staticmethod
     def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -500,7 +547,8 @@ class ConfigStore:
 
     def apply_config(self, new_config_data: dict[str, Any], remove_draft: bool = False) -> ConfigApplyResult:
         with self._lock:
-            new_saved = AssistantConfig.model_validate(new_config_data)
+            new_saved = migrate_legacy_default_wake_phrase(AssistantConfig.model_validate(new_config_data))
+            new_saved = migrate_legacy_configured_text_command_recognizer(new_saved, new_config_data)
             old_saved_dict = self.saved.public_dict()
             new_saved_dict = new_saved.public_dict()
             changed_paths = _flatten_diff_paths(old_saved_dict, new_saved_dict)
@@ -569,4 +617,5 @@ __all__ = [
     "DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND",
     "production_wake_config",
     "migrate_legacy_default_wake_phrase",
+    "migrate_legacy_configured_text_command_recognizer",
 ]

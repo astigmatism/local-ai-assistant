@@ -2,19 +2,39 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from voice_assistant.commands import CommandRegistry
+import pytest
+
+import voice_assistant.commands as commands_module
+from conftest import write_wav
+from voice_assistant.commands import CommandRegistry, PocketsphinxCommandRecognizer, build_command_recognizer
 from voice_assistant.config import AssistantConfig
 from voice_assistant.constants import CommandIntent
 from voice_assistant.conversation import ConversationManager
 from voice_assistant.telemetry import utc_now
 
 
-def test_command_matching_uses_whole_utterance_not_substrings():
+@pytest.mark.parametrize(
+    "phrase",
+    ["stop", "cancel", "forget it", "never mind", " Stop. ", "CANCEL", "Never mind!"],
+)
+def test_cancel_stop_aliases_match_whole_command_utterance_variants(phrase):
     registry = CommandRegistry(AssistantConfig().command_registry)
-    assert registry.match_text("cancel").intent == CommandIntent.CANCEL_STOP.value
-    assert registry.match_text("Cancel!").intent == CommandIntent.CANCEL_STOP.value
-    assert registry.match_text("How do I cancel a process in Linux?") is None
-    assert registry.match_text("please stop talking") is None
+
+    match = registry.match_text(phrase)
+
+    assert match is not None
+    assert match.intent == CommandIntent.CANCEL_STOP.value
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["How do I stop a Linux service?", "How do I cancel a process in Linux?", "please stop talking"],
+)
+def test_command_matching_uses_whole_utterance_not_substrings(phrase):
+    registry = CommandRegistry(AssistantConfig().command_registry)
+
+    assert registry.match_text(phrase) is None
+
 
 
 def test_command_aliases_and_disabled_state():
@@ -25,6 +45,120 @@ def test_command_aliases_and_disabled_state():
     cfg.command_registry.commands[0].enabled = False
     registry = CommandRegistry(cfg.command_registry)
     assert registry.match_text("stop") is None
+
+
+
+def test_default_command_recognizer_is_local_audio_recognizer_not_diagnostic_text_only():
+    cfg = AssistantConfig()
+
+    recognizer = build_command_recognizer(cfg.command_registry)
+
+    assert cfg.command_registry.recognizer.engine == "pocketsphinx"
+    assert isinstance(recognizer, PocketsphinxCommandRecognizer)
+
+
+class _FakePocketsphinxProcess:
+    def __init__(self, stdout: bytes, stderr: bytes = b"", returncode: int = 0):
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self.terminated = False
+        self.killed = False
+
+    async def communicate(self, input=None):
+        self.input = input
+        return self._stdout, self._stderr
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        return self.returncode
+
+
+@pytest.mark.asyncio
+async def test_pocketsphinx_recognizer_decodes_prompt_audio_locally_before_matching(monkeypatch, tmp_path):
+    wav_path = write_wav(tmp_path / "prompt.wav")
+    registry = CommandRegistry(AssistantConfig().command_registry)
+    captured_command: list[str] = []
+
+    async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
+        captured_command.extend(command)
+        return _FakePocketsphinxProcess(b"000000000: Cancel.\n")
+
+    monkeypatch.setattr(commands_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(commands_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    recognizer = PocketsphinxCommandRecognizer(
+        command=["pocketsphinx_continuous"],
+        hmm_path="/model/hmm",
+        dict_path="/model/dict",
+        lm_path="/model/lm.bin",
+        timeout_seconds=1.0,
+    )
+
+    match = await recognizer.recognize(wav_path, registry)
+
+    assert match is not None
+    assert match.intent == CommandIntent.CANCEL_STOP.value
+    assert match.alias == "cancel"
+    assert captured_command[:1] == ["pocketsphinx_continuous"]
+    assert "-infile" in captured_command
+    assert "/dev/stdin" in captured_command
+    assert str(wav_path) not in captured_command
+    assert "-lm" in captured_command
+
+
+@pytest.mark.asyncio
+async def test_pocketsphinx_recognizer_rejects_longer_local_transcripts_with_command_words(monkeypatch, tmp_path):
+    wav_path = write_wav(tmp_path / "prompt.wav")
+    registry = CommandRegistry(AssistantConfig().command_registry)
+
+    async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
+        return _FakePocketsphinxProcess(b"000000000: How do I stop a Linux service?\n")
+
+    monkeypatch.setattr(commands_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(commands_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    recognizer = PocketsphinxCommandRecognizer(
+        command=["pocketsphinx_continuous"],
+        hmm_path="/model/hmm",
+        dict_path="/model/dict",
+        lm_path=None,
+        timeout_seconds=1.0,
+    )
+
+    assert await recognizer.recognize(wav_path, registry) is None
+
+
+@pytest.mark.asyncio
+async def test_pocketsphinx_recognizer_uses_sidecar_text_without_external_decoder(monkeypatch, tmp_path):
+    wav_path = write_wav(tmp_path / "prompt.wav")
+    sidecar = tmp_path / "prompt.wav.command.txt"
+    sidecar.write_text("forget it", encoding="utf-8")
+    registry = CommandRegistry(AssistantConfig().command_registry)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("sidecar command text should be matched without running a decoder")
+
+    monkeypatch.setattr(commands_module.asyncio, "create_subprocess_exec", fail_if_called)
+    recognizer = PocketsphinxCommandRecognizer(
+        command=["pocketsphinx_continuous"],
+        hmm_path="/model/hmm",
+        dict_path="/model/dict",
+        lm_path=None,
+        timeout_seconds=1.0,
+    )
+
+    match = await recognizer.recognize(wav_path, registry)
+
+    assert match is not None
+    assert match.intent == CommandIntent.CANCEL_STOP.value
+    assert match.alias == "forget it"
+
 
 
 def test_conversation_preserves_context_until_timeout_and_does_not_truncate():
@@ -42,6 +176,7 @@ def test_conversation_preserves_context_until_timeout_and_does_not_truncate():
     assert manager.expire_if_needed(utc_now()) is True
     assert manager.conversation_id != cid
     assert manager.messages_for_llm() == [{"role": "system", "content": "system"}]
+
 
 
 def test_new_conversation_reset_discards_context():

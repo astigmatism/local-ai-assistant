@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -127,6 +128,17 @@ class HealthChecker:
 
     async def check_command_recognizer(self) -> HealthItem:
         recognizer = self.cfg.command_registry.recognizer
+        if recognizer.engine == "pocketsphinx":
+            executable = recognizer.pocketsphinx_command[0] if recognizer.pocketsphinx_command else "pocketsphinx_continuous"
+            if Path(executable).name == executable and shutil.which(executable) is None:
+                return HealthItem("local command recognizer", False, f"{executable} is not installed", "error")
+            if not Path(recognizer.pocketsphinx_hmm_path).is_dir():
+                return HealthItem("local command recognizer", False, f"PocketSphinx HMM path is missing: {recognizer.pocketsphinx_hmm_path}", "error")
+            if not Path(recognizer.pocketsphinx_dict_path).is_file():
+                return HealthItem("local command recognizer", False, f"PocketSphinx dictionary is missing: {recognizer.pocketsphinx_dict_path}", "error")
+            if recognizer.pocketsphinx_lm_path and not Path(recognizer.pocketsphinx_lm_path).is_file():
+                return HealthItem("local command recognizer", False, f"PocketSphinx language model is missing: {recognizer.pocketsphinx_lm_path}", "error")
+            return HealthItem("local command recognizer", True, "PocketSphinx local command audio recognizer available")
         if recognizer.engine == "vosk":
             if not recognizer.vosk_model_path:
                 return HealthItem("local command recognizer", False, "Vosk model path is not configured", "error")
