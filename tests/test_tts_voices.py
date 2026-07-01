@@ -62,6 +62,29 @@ def test_tts_sound_phrase_sanitization_matches_script_shape():
     assert phrase_output_filename("!!!") == "sound.wav"
 
 
+def test_default_generated_tts_phrases_keep_punctuation_for_tts_but_stable_filenames():
+    phrases = AssistantConfig().sounds.generated_tts_phrases
+
+    assert phrases == [
+        "wake ack!",
+        "prompt accepted.",
+        "command accepted!",
+        "new conversation.",
+        "failure!",
+        "admin test.",
+        "thinking...",
+    ]
+    assert [phrase_output_filename(phrase) for phrase in phrases] == [
+        "wake_ack.wav",
+        "prompt_accepted.wav",
+        "command_accepted.wav",
+        "new_conversation.wav",
+        "failure.wav",
+        "admin_test.wav",
+        "thinking.wav",
+    ]
+
+
 def test_normalize_generated_tts_phrases_trims_blanks_and_rejects_duplicate_targets():
     assert normalize_generated_tts_phrases([" wake ack ", "", "admin ready"]) == ["wake ack", "admin ready"]
     with pytest.raises(ValueError, match="both target"):
@@ -73,7 +96,7 @@ def test_normalize_generated_tts_phrases_trims_blanks_and_rejects_duplicate_targ
 async def test_regenerate_generated_tts_sounds_overwrites_only_phrase_files(tmp_path):
     cfg_data = AssistantConfig().public_dict()
     cfg_data["sounds"]["library_dir"] = str(tmp_path)
-    cfg_data["sounds"]["generated_tts_phrases"] = ["wake ack", "failure"]
+    cfg_data["sounds"]["generated_tts_phrases"] = ["wake ack!", "failure!"]
     cfg = AssistantConfig.model_validate(cfg_data)
     (tmp_path / "wake_ack.wav").write_bytes(b"old wake")
     unrelated = tmp_path / "uploaded.wav"
@@ -84,8 +107,8 @@ async def test_regenerate_generated_tts_sounds_overwrites_only_phrase_files(tmp_
 
     assert result["voice"] == "bf_emma"
     assert {item["filename"] for item in result["generated_files"]} == {"wake_ack.wav", "failure.wav"}
-    assert tts.calls[0][0] == "wake ack"
-    assert tts.calls[1][0] == "failure"
+    assert tts.calls[0][0] == "wake ack!"
+    assert tts.calls[1][0] == "failure!"
     assert (tmp_path / "wake_ack.wav").read_bytes() != b"old wake"
     assert unrelated.read_bytes() == b"keep me"
 

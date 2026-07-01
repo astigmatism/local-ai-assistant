@@ -132,7 +132,7 @@ def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundl
         "Status": ['id="status"', 'id="health"', 'loadWakeDebug()'],
         "Configuration": ['id="config"', 'applyDraft()', 'Edits are applied as a group'],
         "Text-to-Speech Voices": ['id="ttsVoiceSelect"', 'loadTtsVoices()', 'ttsSampleText', 'ttsGeneratedPhrases', 'ttsGeneratedSoundFiles', 'testTtsVoice()', 'applyTtsVoice()', 'services.tts.voice', 'sounds.generated_tts_phrases'],
-        "Sound Library": ['id="soundFile"', 'loadSounds()', 'empty string', 'non-empty array', 'wake_new_conversation', 'command_thinking', 'playSoundEvent()'],
+        "Sound Library": ['id="soundFile"', 'loadSounds()', 'empty string', 'command_thinking', 'playSoundEvent()'],
         "Diagnostics": ['id="testText"', 'llmTtsTest()', 'commandTest()'],
         "Telemetry": ['id="events"', 'loadEvents()', 'Search history'],
     }
@@ -143,19 +143,18 @@ def test_known_admin_sections_keep_their_content_inside_collapsible_bodies(bundl
 
 
 
-def test_admin_portal_displays_command_thinking_sound_event_controls(bundle_parts):
+def test_admin_portal_displays_sound_event_controls_for_command_and_new_wake_events(bundle_parts):
     client, _ = make_client(bundle_parts)
     html = client.get("/").text
     sounds_payload = client.get("/api/sounds").json()
 
     assert "Command thinking" in html
-    assert 'value="wake_new_conversation"' in html
-    assert "command_thinking" in html
     assert "wake_new_conversation" in html
+    assert 'value="wake_new_conversation"' in html
     assert "function playSoundEvent()" in html
     assert SoundEvent.COMMAND_THINKING.value in sounds_payload["event_files"]
     assert SoundEvent.WAKE_NEW_CONVERSATION.value in sounds_payload["event_files"]
-    assert SoundEvent.WAKE_NEW_CONVERSATION.value in sounds_payload["available_events"]
+    assert "non-empty array of strings" in sounds_payload["format_guidance"]
 
 def test_admin_portal_runtime_content_is_not_loaded_until_panel_expands(bundle_parts):
     client, _ = make_client(bundle_parts)
@@ -308,21 +307,17 @@ def test_config_export_import_preserves_command_thinking_sound_event(bundle_part
     saved = client.get("/api/config").json()["saved"]
     saved["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] = "command-thinking-custom.wav"
     saved["sounds"]["event_files"][SoundEvent.THINKING.value] = "thinking-custom.wav"
-    saved["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] = ["wake-new-a.wav", "wake-new-b.wav"]
 
     applied = client.post("/api/config/apply", json={"config": saved})
 
     assert applied.status_code == 200
     assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
     assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.THINKING.value] == "thinking-custom.wav"
-    assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] == ["wake-new-a.wav", "wake-new-b.wav"]
     exported = client.get("/api/config/export").json()
     assert exported["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
-    assert exported["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] == ["wake-new-a.wav", "wake-new-b.wav"]
     imported = client.post("/api/config/import", json=exported)
     assert imported.status_code == 200
     assert imported.json()["draft"]["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
-    assert imported.json()["draft"]["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] == ["wake-new-a.wav", "wake-new-b.wav"]
 
 
 
@@ -330,13 +325,11 @@ def test_config_draft_saves_command_thinking_sound_event(bundle_parts):
     client, _ = make_client(bundle_parts)
     saved = client.get("/api/config").json()["saved"]
     saved["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] = "command-thinking-custom.wav"
-    saved["sounds"]["event_files"][SoundEvent.INVALID_PROMPT.value] = ["invalid-a.wav", "invalid-b.wav"]
 
     response = client.post("/api/config/draft", json=saved)
 
     assert response.status_code == 200
     assert response.json()["draft"]["sounds"]["event_files"][SoundEvent.COMMAND_THINKING.value] == "command-thinking-custom.wav"
-    assert response.json()["draft"]["sounds"]["event_files"][SoundEvent.INVALID_PROMPT.value] == ["invalid-a.wav", "invalid-b.wav"]
 
 
 def test_config_draft_validation_errors_return_400_details(bundle_parts):
@@ -362,26 +355,40 @@ def test_config_apply_validation_errors_return_400_details(bundle_parts):
     assert response.status_code == 400
     detail = response.json()["detail"]
     assert detail["message"] == "Configuration validation failed."
-    assert any("string or a non-empty array" in error["msg"] for error in detail["errors"])
+    assert any(SoundEvent.COMMAND_THINKING.value in error["loc"] for error in detail["errors"])
 
 def test_config_export_import_preserves_empty_sound_event_file(bundle_parts):
     client, _ = make_client(bundle_parts)
     saved = client.get("/api/config").json()["saved"]
     saved["sounds"]["event_files"][SoundEvent.PROMPT_ACCEPTED.value] = ""
-    saved["sounds"]["event_files"][SoundEvent.INVALID_PROMPT.value] = ["invalid-a.wav", ""]
 
     applied = client.post("/api/config/apply", json={"config": saved})
 
     assert applied.status_code == 200
     assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.PROMPT_ACCEPTED.value] == ""
-    assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.INVALID_PROMPT.value] == ["invalid-a.wav", ""]
     exported = client.get("/api/config/export").json()
     assert exported["sounds"]["event_files"][SoundEvent.PROMPT_ACCEPTED.value] == ""
-    assert exported["sounds"]["event_files"][SoundEvent.INVALID_PROMPT.value] == ["invalid-a.wav", ""]
     imported = client.post("/api/config/import", json=exported)
     assert imported.status_code == 200
     assert imported.json()["draft"]["sounds"]["event_files"][SoundEvent.PROMPT_ACCEPTED.value] == ""
-    assert imported.json()["draft"]["sounds"]["event_files"][SoundEvent.INVALID_PROMPT.value] == ["invalid-a.wav", ""]
+
+
+def test_config_export_import_preserves_sound_event_arrays_and_new_wake_event(bundle_parts):
+    client, _ = make_client(bundle_parts)
+    saved = client.get("/api/config").json()["saved"]
+    saved["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] = ["wake-new-a.wav", "", "wake-new-b.wav"]
+    saved["sounds"]["event_files"][SoundEvent.WAKE_ACK.value] = "wake-continue.wav"
+
+    applied = client.post("/api/config/apply", json={"config": saved})
+
+    assert applied.status_code == 200
+    assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] == ["wake-new-a.wav", "", "wake-new-b.wav"]
+    assert applied.json()["saved"]["sounds"]["event_files"][SoundEvent.WAKE_ACK.value] == "wake-continue.wav"
+    exported = client.get("/api/config/export").json()
+    assert exported["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] == ["wake-new-a.wav", "", "wake-new-b.wav"]
+    imported = client.post("/api/config/import", json=exported)
+    assert imported.status_code == 200
+    assert imported.json()["draft"]["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] == ["wake-new-a.wav", "", "wake-new-b.wav"]
 
 
 def test_sound_upload_list_play_delete(bundle_parts, tmp_path):
@@ -394,8 +401,6 @@ def test_sound_upload_list_play_delete(bundle_parts, tmp_path):
     sounds_payload = client.get("/api/sounds").json()
     assert "custom.wav" in sounds_payload["files"]
     assert "empty string" in sounds_payload["format_guidance"]
-    assert "non-empty array" in sounds_payload["format_guidance"]
-    assert "randomly select" in sounds_payload["format_guidance"]
     assert SoundEvent.COMMAND_THINKING.value in sounds_payload["event_files"]
     assert SoundEvent.WAKE_NEW_CONVERSATION.value in sounds_payload["event_files"]
 
@@ -404,7 +409,9 @@ def test_sound_upload_list_play_delete(bundle_parts, tmp_path):
     saved["sounds"]["event_files"][SoundEvent.THINKING.value] = "thinking.wav"
     assert client.post("/api/config/apply", json={"config": saved}).status_code == 200
     assert client.post(f"/api/sound-events/{SoundEvent.COMMAND_THINKING.value}/play").status_code == 200
+    assert client.post(f"/api/sound-events/{SoundEvent.WAKE_NEW_CONVERSATION.value}/play").status_code == 200
     assert ("play_sound_event", str(SoundEvent.COMMAND_THINKING)) in audio.calls
+    assert ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION)) in audio.calls
 
     assert client.post("/api/sounds/custom.wav/play").status_code == 200
     assert client.delete("/api/sounds/custom.wav").status_code == 200
@@ -493,11 +500,13 @@ def test_tts_voices_section_renders_as_collapsible_admin_panel(bundle_parts):
     assert 'id="ttsSelectedVoice"' in fragment
     assert 'id="ttsVoiceSelect"' in fragment
     assert 'id="ttsSampleText"' in fragment
-    assert "Hello, this is a test of this Kokoro voice." in fragment
+    assert "Hello! This is a test of this Kokoro voice. Does punctuation change the inflection?" in fragment
     assert 'id="ttsGeneratedSoundDirectory"' in fragment
     assert 'id="ttsGeneratedPhrases"' in fragment
     assert 'id="ttsGeneratedSoundFiles"' in fragment
     assert "sounds.generated_tts_phrases" in fragment
+    assert "wake ack!" in fragment
+    assert "prompt accepted." in fragment
     assert "only these target WAV files" in fragment
     assert 'id="ttsTestButton"' in fragment
     assert 'id="ttsApplyButton"' in fragment
@@ -522,6 +531,9 @@ def test_tts_voice_list_endpoint_is_kokoro_only_and_shows_configured_voice(bundl
     assert body["voice_count"] == len(KOKORO_VOICES)
     assert "chatterbox" not in str(body).lower()
     assert body["generated_tts_sound_directory"] == store.get_saved().sounds.library_dir
+    assert body["sample_default"] == "Hello! This is a test of this Kokoro voice. Does punctuation change the inflection?"
+    assert body["generated_tts_phrases"] == store.get_saved().sounds.generated_tts_phrases
+    assert any(any(mark in phrase for mark in "?!.") for phrase in body["generated_tts_phrases"])
     assert body["generated_tts_sound_files"] == [phrase_output_filename(phrase) for phrase in body["generated_tts_phrases"]]
 
 
