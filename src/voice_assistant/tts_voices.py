@@ -125,6 +125,25 @@ def _validate_wav(path: Path) -> dict[str, Any]:
     }
 
 
+def _verify_sound_library_writable(sound_dir: Path) -> None:
+    try:
+        sound_dir.mkdir(parents=True, exist_ok=True)
+        probe_path = sound_dir / f".write-test.{uuid.uuid4().hex}.tmp"
+        with probe_path.open("xb"):
+            pass
+        probe_path.unlink()
+    except PermissionError as exc:
+        raise PermissionError(
+            "The configured sound library directory is not writable by the assistant runtime: "
+            f"{sound_dir}. Ensure the host bind mount is writable by the container user before regenerating sounds."
+        ) from exc
+    except OSError as exc:
+        raise OSError(
+            "The configured sound library directory cannot be used for generated sounds: "
+            f"{sound_dir}: {exc}"
+        ) from exc
+
+
 async def regenerate_generated_tts_sounds(
     config: AssistantConfig,
     tts_factory: Callable[[AssistantConfig], Any],
@@ -136,7 +155,7 @@ async def regenerate_generated_tts_sounds(
     phrase_list = normalize_generated_tts_phrases(phrases if phrases is not None else effective_config.sounds.generated_tts_phrases)
 
     sound_dir = Path(effective_config.sounds.library_dir)
-    sound_dir.mkdir(parents=True, exist_ok=True)
+    _verify_sound_library_writable(sound_dir)
     owner_group = sound_dir.stat()
     generated: list[dict[str, Any]] = []
     touched: set[str] = set()

@@ -768,26 +768,9 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
                 saved_data["services"]["tts"]["voice"] = voice
                 if phrases is not None:
                     saved_data["sounds"]["generated_tts_phrases"] = phrases
-                config_result = bundle.config_store.apply_config(saved_data)
-                config_updated = True
-                await bundle.runtime.reload_runtime_components()
-                bundle.telemetry.log_event(
-                    EventType.CONFIG,
-                    "TTS voice committed to saved configuration.",
-                    component="admin",
-                    success=True,
-                    data={
-                        "voice": voice,
-                        "configuration_path": "services.tts.voice",
-                        "generated_tts_phrases_updated": phrases is not None,
-                        "generated_tts_phrase_count": len(phrases or bundle.config_store.get_active().sounds.generated_tts_phrases),
-                        "pending_restart_paths": config_result.pending_restart_paths,
-                        "applied_runtime_paths": config_result.applied_runtime_paths,
-                    },
-                )
+                candidate_config = AssistantConfig.model_validate(saved_data)
+                phrases_to_generate = phrases or list(candidate_config.sounds.generated_tts_phrases)
 
-                cfg = bundle.config_store.get_active()
-                phrases_to_generate = phrases or list(cfg.sounds.generated_tts_phrases)
                 bundle.telemetry.log_event(
                     EventType.SOUND,
                     "TTS-generated assistant sound regeneration started.",
@@ -795,7 +778,30 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
                     success=True,
                     data={"voice": voice, "phrase_count": len(phrases_to_generate), "phrases": phrases_to_generate},
                 )
-                regeneration = await regenerate_generated_tts_sounds(cfg, bundle.runtime.tts_factory, voice=voice, phrases=phrases_to_generate)
+                regeneration = await regenerate_generated_tts_sounds(
+                    candidate_config,
+                    bundle.runtime.tts_factory,
+                    voice=voice,
+                    phrases=phrases_to_generate,
+                )
+
+                config_result = bundle.config_store.apply_config(saved_data)
+                config_updated = True
+                await bundle.runtime.reload_runtime_components()
+                bundle.telemetry.log_event(
+                    EventType.CONFIG,
+                    "TTS voice committed to saved configuration after generated sounds were regenerated.",
+                    component="admin",
+                    success=True,
+                    data={
+                        "voice": voice,
+                        "configuration_path": "services.tts.voice",
+                        "generated_tts_phrases_updated": phrases is not None,
+                        "generated_tts_phrase_count": len(phrases_to_generate),
+                        "pending_restart_paths": config_result.pending_restart_paths,
+                        "applied_runtime_paths": config_result.applied_runtime_paths,
+                    },
+                )
             except ValidationError as exc:
                 _raise_config_validation_error(exc)
             except Exception as exc:
@@ -811,7 +817,7 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=502,
                     detail={
-                        "message": "TTS voice commit or generated sound regeneration failed.",
+                        "message": "TTS voice commit or generated sound regeneration failed. Configuration is not updated unless generated sound regeneration succeeds.",
                         "error": _public_error(exc),
                         "configuration_updated": config_updated,
                         "configuration_result": config_result.model_dump(mode="json") if config_result else None,

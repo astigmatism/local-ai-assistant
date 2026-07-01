@@ -6,6 +6,7 @@ import pytest
 
 from conftest import write_wav
 from voice_assistant.config import AssistantConfig
+import voice_assistant.tts_voices as tts_voice_module
 from voice_assistant.tts_voices import (
     KOKORO_VOICES,
     config_with_tts_voice,
@@ -102,3 +103,21 @@ async def test_regenerate_generated_tts_sounds_rejects_invalid_wav_without_overw
         await regenerate_generated_tts_sounds(cfg, lambda _cfg: tts, voice="bf_emma")
 
     assert existing.read_bytes() == b"old wake"
+
+
+async def test_regenerate_generated_tts_sounds_checks_sound_directory_before_synthesis(tmp_path, monkeypatch):
+    cfg_data = AssistantConfig().public_dict()
+    cfg_data["sounds"]["library_dir"] = str(tmp_path)
+    cfg_data["sounds"]["generated_tts_phrases"] = ["wake ack"]
+    cfg = AssistantConfig.model_validate(cfg_data)
+    tts = RecordingTTS()
+
+    def fail_writable_check(sound_dir):
+        raise PermissionError("sound directory not writable")
+
+    monkeypatch.setattr(tts_voice_module, "_verify_sound_library_writable", fail_writable_check)
+
+    with pytest.raises(PermissionError, match="not writable"):
+        await regenerate_generated_tts_sounds(cfg, lambda _cfg: tts, voice="bf_emma")
+
+    assert tts.calls == []

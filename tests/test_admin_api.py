@@ -683,15 +683,18 @@ def test_tts_voice_apply_rejects_empty_or_duplicate_phrase_targets_without_confi
     assert store.get_saved().sounds.generated_tts_phrases == original_saved.sounds.generated_tts_phrases
 
 
-def test_tts_voice_apply_reports_regeneration_failure_after_config_update(bundle_parts):
+def test_tts_voice_apply_reports_regeneration_failure_without_config_update(bundle_parts):
     client, (store, telemetry, runtime, audio, stt, llm, tts) = make_client(bundle_parts)
+    original_saved = store.get_saved()
     tts.exc = RuntimeError("tts generation failed")
 
     response = client.post("/api/tts-voices/apply", json={"voice": "bf_emma"})
 
     assert response.status_code == 502
     body = response.json()["detail"]
-    assert body["configuration_updated"] is True
-    assert body["configuration_result"]["saved"]["services"]["tts"]["voice"] == "bf_emma"
-    assert store.get_saved().services.tts.voice == "bf_emma"
+    assert body["configuration_updated"] is False
+    assert body["configuration_result"] is None
+    assert "Configuration is not updated unless generated sound regeneration succeeds" in body["message"]
+    assert store.get_saved().services.tts.voice == original_saved.services.tts.voice
+    assert store.get_active().services.tts.voice == original_saved.services.tts.voice
     assert "test-tts" not in response.text
