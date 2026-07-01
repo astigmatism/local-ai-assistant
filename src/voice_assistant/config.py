@@ -5,14 +5,11 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .constants import CommandIntent, SoundEvent
-
-
-SoundEventFile: TypeAlias = str | Annotated[list[str], Field(min_length=1)]
 
 
 RESTART_REQUIRED_PREFIXES = {
@@ -109,6 +106,9 @@ class CommandRecognizerConfig(BaseModel):
     confidence_threshold: float = Field(0.70, ge=0.0, le=1.0)
 
 
+SoundEventFileValue: TypeAlias = str | list[str]
+
+
 class CommandRegistryConfig(BaseModel):
     recognizer: CommandRecognizerConfig = Field(default_factory=CommandRecognizerConfig)
     commands: list[CommandDefinition] = Field(
@@ -151,7 +151,7 @@ class SoundConfig(BaseModel):
             "thinking...",
         ]
     )
-    event_files: dict[SoundEvent, SoundEventFile] = Field(
+    event_files: dict[SoundEvent, SoundEventFileValue] = Field(
         default_factory=lambda: {
             SoundEvent.WAKE_ACK: "wake_ack.wav",
             SoundEvent.WAKE_NEW_CONVERSATION: "wake_ack.wav",
@@ -171,6 +171,26 @@ class SoundConfig(BaseModel):
     )
 
 
+    @field_validator("event_files", mode="before")
+    @classmethod
+    def sound_event_files_are_strings_or_non_empty_string_arrays(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        for event_key, event_value in value.items():
+            if isinstance(event_value, str):
+                continue
+            if isinstance(event_value, list):
+                if not event_value:
+                    raise ValueError(
+                        f"sound event {event_key!r} must not be an empty array; "
+                        "use an empty string to intentionally disable playback"
+                    )
+                if not all(isinstance(item, str) for item in event_value):
+                    raise ValueError(f"sound event {event_key!r} array entries must all be strings")
+                continue
+            raise ValueError(f"sound event {event_key!r} must be a string or a non-empty array of strings")
+        return value
+
     @field_validator("generated_tts_phrases")
     @classmethod
     def generated_tts_phrases_non_empty(cls, value: list[str]) -> list[str]:
@@ -189,25 +209,27 @@ class SoundConfig(BaseModel):
             return value
 
         normalized_event_files = dict(event_files)
-
-        def has_event(event: SoundEvent) -> bool:
-            return event.value in normalized_event_files or event in normalized_event_files
-
-        def get_event(event: SoundEvent, default: SoundEventFile) -> SoundEventFile:
-            if event.value in normalized_event_files:
-                return normalized_event_files[event.value]
-            return normalized_event_files.get(event, default)
-
         changed = False
-        if not has_event(SoundEvent.COMMAND_THINKING):
-            normalized_event_files[SoundEvent.COMMAND_THINKING.value] = get_event(SoundEvent.THINKING, "thinking.wav")
+
+        command_key = SoundEvent.COMMAND_THINKING.value
+        if command_key not in normalized_event_files and SoundEvent.COMMAND_THINKING not in normalized_event_files:
+            thinking_file = normalized_event_files.get(SoundEvent.THINKING.value)
+            if thinking_file is None:
+                thinking_file = normalized_event_files.get(SoundEvent.THINKING, "thinking.wav")
+            normalized_event_files[command_key] = copy.deepcopy(thinking_file)
             changed = True
-        if not has_event(SoundEvent.WAKE_NEW_CONVERSATION):
-            normalized_event_files[SoundEvent.WAKE_NEW_CONVERSATION.value] = get_event(SoundEvent.WAKE_ACK, "wake_ack.wav")
+
+        wake_new_key = SoundEvent.WAKE_NEW_CONVERSATION.value
+        if wake_new_key not in normalized_event_files and SoundEvent.WAKE_NEW_CONVERSATION not in normalized_event_files:
+            wake_file = normalized_event_files.get(SoundEvent.WAKE_ACK.value)
+            if wake_file is None:
+                wake_file = normalized_event_files.get(SoundEvent.WAKE_ACK, "wake_ack.wav")
+            normalized_event_files[wake_new_key] = copy.deepcopy(wake_file)
             changed = True
 
         if not changed:
             return value
+
         normalized = dict(value)
         normalized["event_files"] = normalized_event_files
         return normalized
