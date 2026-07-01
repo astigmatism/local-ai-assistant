@@ -146,6 +146,7 @@ class AssistantRuntime:
     async def on_wake_detected(self, detection: WakeDetection) -> None:
         async with self._interaction_lock:
             current_state = self.state.state
+            force_continuing_wake_ack = False
             if current_state == RuntimeState.CAPTURING_PROMPT:
                 self.telemetry.log_event(
                     EventType.WAKE_DETECTED,
@@ -162,6 +163,7 @@ class AssistantRuntime:
                 RuntimeState.WAKE_DETECTED,
                 RuntimeState.CHECKING_COMMAND,
             }:
+                force_continuing_wake_ack = True
                 self.telemetry.log_event(
                     EventType.BARGE_IN,
                     "Wake word detected during active processing/playback; cancelling current process and starting a new capture.",
@@ -169,11 +171,28 @@ class AssistantRuntime:
                     data={"phrase": detection.phrase, "confidence": detection.confidence, "engine": detection.engine},
                 )
                 await self._cancel_current("barge-in")
-            await self._start_interaction_task(detection, play_wake_sound=True)
+            await self._start_interaction_task(
+                detection,
+                play_wake_sound=True,
+                force_continuing_wake_ack=force_continuing_wake_ack,
+            )
 
-    async def _start_interaction_task(self, detection: WakeDetection | None, *, play_wake_sound: bool) -> None:
+    async def _start_interaction_task(
+        self,
+        detection: WakeDetection | None,
+        *,
+        play_wake_sound: bool,
+        force_continuing_wake_ack: bool = False,
+    ) -> None:
         interaction_id = str(uuid.uuid4())
-        task = asyncio.create_task(self._interaction_flow(interaction_id, detection, play_wake_sound=play_wake_sound))
+        task = asyncio.create_task(
+            self._interaction_flow(
+                interaction_id,
+                detection,
+                play_wake_sound=play_wake_sound,
+                force_continuing_wake_ack=force_continuing_wake_ack,
+            )
+        )
         self._current_task = task
 
     async def wait_until_idle(self, timeout: float = 30.0) -> None:
@@ -200,6 +219,7 @@ class AssistantRuntime:
         detection: WakeDetection | None,
         *,
         play_wake_sound: bool,
+        force_continuing_wake_ack: bool = False,
     ) -> None:
         cfg = self.config_store.get_active()
         self._refresh_conversation_config(cfg)
@@ -210,6 +230,7 @@ class AssistantRuntime:
             self.conversation.expire_if_needed()
             conversation_id = self.conversation.conversation_id
             if play_wake_sound:
+                wake_sound_event = self._wake_acknowledgement_event(force_continuing=force_continuing_wake_ack)
                 self.state.set_state(RuntimeState.WAKE_DETECTED, interaction_id=interaction_id, conversation_id=conversation_id)
                 self.telemetry.log_event(
                     EventType.WAKE_DETECTED,
@@ -221,11 +242,13 @@ class AssistantRuntime:
                         "phrase": detection.phrase if detection else cfg.wake.active_wake_phrase,
                         "confidence": detection.confidence if detection else None,
                         "engine": detection.engine if detection else cfg.wake.engine,
+                        "sound_event": wake_sound_event.value,
+                        "conversation_context_active": wake_sound_event == SoundEvent.WAKE_ACK,
                     },
                 )
                 await self.wake_engine.pause("wake_ack")
                 wake_detector_paused = True
-                await self._play_wake_acknowledgement(cfg, interaction_id, conversation_id)
+                await self._play_wake_acknowledgement(cfg, interaction_id, conversation_id, wake_sound_event)
 
             await self._capture_gate_and_process(
                 cfg,
@@ -266,6 +289,7 @@ class AssistantRuntime:
         cfg: AssistantConfig,
         interaction_id: str,
         conversation_id: str,
+        sound_event: SoundEvent,
     ) -> None:
         started = time.monotonic()
         self.telemetry.log_event(
@@ -275,12 +299,12 @@ class AssistantRuntime:
             conversation_id=conversation_id,
             interaction_id=interaction_id,
             component="audio",
-            data={"sound_event": SoundEvent.WAKE_ACK.value},
+            data={"sound_event": sound_event.value},
         )
         try:
             await self.audio.play_sound_event(
                 cfg,
-                SoundEvent.WAKE_ACK,
+                sound_event,
                 cancel_event=self._active_cancel_event,
                 require_playback=True,
             )
@@ -298,7 +322,7 @@ class AssistantRuntime:
                 success=False,
                 error=str(exc),
                 duration_ms=duration_ms,
-                data={"sound_event": SoundEvent.WAKE_ACK.value},
+                data={"sound_event": sound_event.value},
             )
             return
         duration_ms = (time.monotonic() - started) * 1000
@@ -311,8 +335,13 @@ class AssistantRuntime:
             component="audio",
             success=True,
             duration_ms=duration_ms,
-            data={"sound_event": SoundEvent.WAKE_ACK.value},
+            data={"sound_event": sound_event.value},
         )
+
+    def _wake_acknowledgement_event(self, *, force_continuing: bool = False) -> SoundEvent:
+        if force_continuing or self.conversation.has_active_context():
+            return SoundEvent.WAKE_ACK
+        return SoundEvent.WAKE_NEW_CONVERSATION
 
     def _refresh_conversation_config(self, cfg: AssistantConfig) -> None:
         self.conversation.inactivity_timeout_seconds = cfg.conversation.inactivity_timeout_seconds

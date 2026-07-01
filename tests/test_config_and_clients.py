@@ -20,7 +20,9 @@ def test_default_configuration_matches_design_inventory(tmp_path):
     }
     assert set(cfg.sounds.event_files) == set(SoundEvent)
     assert cfg.sounds.event_files[SoundEvent.COMMAND_THINKING] == cfg.sounds.event_files[SoundEvent.THINKING]
+    assert cfg.sounds.event_files[SoundEvent.WAKE_NEW_CONVERSATION] == cfg.sounds.event_files[SoundEvent.WAKE_ACK]
     assert SoundEvent.COMMAND_THINKING.value == "command_thinking"
+    assert SoundEvent.WAKE_NEW_CONVERSATION.value == "wake_new_conversation"
 
 
 
@@ -32,6 +34,17 @@ def test_command_thinking_sound_can_be_configured_independently():
 
     assert cfg.sounds.event_files[SoundEvent.COMMAND_THINKING] == "command-thinking-custom.wav"
     assert cfg.sounds.event_files[SoundEvent.THINKING] == "thinking.wav"
+
+
+def test_wake_new_conversation_sound_can_be_configured_independently():
+    data = AssistantConfig().public_dict()
+    data["sounds"]["event_files"][SoundEvent.WAKE_ACK.value] = "wake-continue.wav"
+    data["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] = "wake-new.wav"
+
+    cfg = AssistantConfig.model_validate(data)
+
+    assert cfg.sounds.event_files[SoundEvent.WAKE_ACK] == "wake-continue.wav"
+    assert cfg.sounds.event_files[SoundEvent.WAKE_NEW_CONVERSATION] == "wake-new.wav"
 
 def test_restart_required_service_settings_are_saved_but_not_runtime_active(tmp_path):
     store = ConfigStore(tmp_path / "config.json")

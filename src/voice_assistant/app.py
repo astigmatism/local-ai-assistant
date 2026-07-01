@@ -103,7 +103,7 @@ def _raise_config_validation_error(exc: ValidationError) -> None:
         status_code=400,
         detail={
             "message": "Configuration validation failed.",
-            "errors": exc.errors(include_url=False, include_input=False),
+            "errors": exc.errors(include_url=False, include_input=False, include_context=False),
         },
     ) from exc
 
@@ -240,10 +240,10 @@ INDEX_HTML = """
     <div id="panel-sound-library" class="admin-panel-body" data-resizable-panel data-load-on-expand="loadSounds" role="region" aria-labelledby="toggle-sound-library" aria-hidden="true" hidden>
       <div id="panel-sound-library-content" class="admin-panel-body-content" data-panel-content>
         <p>Upload WAV files, preferably simple uncompressed PCM WAV. V1 intentionally performs only light filename checks; use playback tests to verify audio. Set a sound event file to an empty string to intentionally disable sound for that event.</p>
-        <p>Assign uploaded files in Configuration under <code>sounds.event_files</code>. Command thinking uses <code>command_thinking</code> for the local command interpretation phase.</p>
+        <p>Assign uploaded files in Configuration under <code>sounds.event_files</code>. Each event value may be one filename string or a non-empty array of filename strings for random selection on each playback. The continuing-conversation wake sound uses <code>wake_ack</code>; a wake that starts a new conversation uses <code>wake_new_conversation</code>. Command thinking uses <code>command_thinking</code> for the local command interpretation phase.</p>
         <input id="soundFile" type="file" /> <button onclick="uploadSound()">Upload</button>
         <button onclick="loadSounds()">List sounds</button>
-        <input id="soundEventName" value="command_thinking" /> <button onclick="playSoundEvent()">Test configured sound event</button>
+        <input id="soundEventName" value="wake_new_conversation" /> <button onclick="playSoundEvent()">Test configured sound event</button>
         <pre id="sounds" data-runtime-output></pre>
       </div>
       <div class="admin-panel-resize-handle" data-resize-handle role="separator" aria-orientation="horizontal" aria-controls="panel-sound-library-content" aria-label="Resize Sound Library section height" aria-valuemin="192" aria-valuemax="720" aria-valuenow="320" tabindex="0">Drag or use arrow keys to resize</div>
@@ -907,8 +907,9 @@ def create_app(bundle: RuntimeBundle | None = None) -> FastAPI:
         return {
             "sound_directory": str(sound_dir),
             "files": files,
+            "available_events": [event.value for event in SoundEvent],
             "event_files": {str(k): v for k, v in cfg.sounds.event_files.items()},
-            "format_guidance": "Use WAV files, preferably simple/uncompressed PCM WAV. Set an event file to an empty string to disable sound for that event. Test playback after upload.",
+            "format_guidance": "Use WAV files, preferably simple/uncompressed PCM WAV. Each sounds.event_files value may be a single filename string or a non-empty array of filename strings. Arrays randomly select one entry for each playback request. Set an event file, or a specific array entry, to an empty string to disable sound for that selected occurrence. Empty arrays are rejected. Test playback after upload.",
         }
 
     @app.post("/api/sounds")

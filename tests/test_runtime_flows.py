@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 
 from voice_assistant.clients import ServiceError
 from voice_assistant.constants import EventType, RuntimeState, SoundEvent
+from voice_assistant.telemetry import utc_now
 from voice_assistant.wake import WakeDetection
 
 
@@ -27,7 +29,7 @@ async def test_normal_prompt_flow_stt_llm_tts_playback_and_context(bundle_parts)
     assert stt.calls
     assert llm.messages[0][-1] == {"role": "user", "content": "what is the weather"}
     assert tts.inputs == ["It is sunny."]
-    assert any(call == ("play_sound_event", str(SoundEvent.WAKE_ACK)) for call in audio.calls)
+    assert any(call == ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION)) for call in audio.calls)
     assert not any(call == ("play_sound_event", str(SoundEvent.PROMPT_ACCEPTED)) for call in audio.calls)
     assert telemetry.query_events(event_type=str(EventType.PROMPT_ACCEPTED))[0].data["sound_playback"] == "suppressed_during_processing_feedback"
     thinking_stop_index = [i for i, call in enumerate(audio.calls) if call[0] == "thinking_stop"][-1]
@@ -40,6 +42,63 @@ async def test_normal_prompt_flow_stt_llm_tts_playback_and_context(bundle_parts)
     assert str(EventType.LLM_RESULT) in event_types
     assert str(EventType.TTS_RESULT) in event_types
     assert str(EventType.PLAYBACK_ENDED) in event_types
+
+
+@pytest.mark.asyncio
+async def test_first_wake_without_context_uses_new_conversation_wake_acknowledgement(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = ["stop"]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    assert ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION)) in audio.calls
+    assert ("play_sound_event", str(SoundEvent.WAKE_ACK)) not in audio.calls
+    wake_event = telemetry.query_events(event_type=str(EventType.WAKE_DETECTED))[0]
+    assert wake_event.data["sound_event"] == SoundEvent.WAKE_NEW_CONVERSATION.value
+    assert wake_event.data["conversation_context_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_wake_with_active_context_uses_continuing_wake_acknowledgement(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    audio.command_texts = [None]
+    stt.outputs = ["remember this"]
+    llm.outputs = ["I will remember it."]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    audio.calls.clear()
+    audio.command_texts = ["stop"]
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    assert ("play_sound_event", str(SoundEvent.WAKE_ACK)) in audio.calls
+    assert ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION)) not in audio.calls
+    latest_wake = telemetry.query_events(event_type=str(EventType.WAKE_DETECTED))[0]
+    assert latest_wake.data["sound_event"] == SoundEvent.WAKE_ACK.value
+    assert latest_wake.data["conversation_context_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_wake_after_conversation_timeout_uses_new_conversation_wake_acknowledgement(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    cfg = store.get_saved().public_dict()
+    cfg["conversation"]["inactivity_timeout_seconds"] = 0.5
+    store.apply_config(cfg)
+    runtime.conversation.add_user("old prompt")
+    runtime.conversation.add_assistant("old answer")
+    runtime.conversation.mark_response_finished(utc_now() - timedelta(seconds=5))
+    old_conversation_id = runtime.conversation.conversation_id
+    audio.command_texts = ["stop"]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    assert runtime.conversation.conversation_id != old_conversation_id
+    assert ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION)) in audio.calls
+    assert ("play_sound_event", str(SoundEvent.WAKE_ACK)) not in audio.calls
 
 
 @pytest.mark.asyncio
@@ -151,6 +210,8 @@ async def test_barge_in_during_playback_cancels_and_starts_new_capture(bundle_pa
 
     assert audio.stop_called is True
     assert len(stt.calls) == 2
+    assert len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION))]) == 1
+    assert len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_ACK))]) == 1
     events = telemetry.query_events(event_type=str(EventType.BARGE_IN))
     assert events and "cancelling" in events[0].human_message
 
@@ -368,6 +429,8 @@ async def test_barge_in_during_processing_stops_normal_thinking(
 
     assert getattr(blocked_client, cancelled_attr) is True
     assert thinking_start < stop_all_index < thinking_stop
+    assert len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION))]) == 1
+    assert len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_ACK))]) == 1
     assert telemetry.query_events(event_type=str(EventType.BARGE_IN))
     assert runtime.state.state == RuntimeState.IDLE
 
@@ -439,8 +502,8 @@ async def test_wake_ack_playback_is_invoked_before_prompt_capture_starts(bundle_
     await runtime.on_wake_detected(detection())
     await runtime.wait_until_idle()
 
-    ack_start_index = _first_call_index(audio.calls, ("play_sound_event_start", str(SoundEvent.WAKE_ACK)))
-    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_ACK)))
+    ack_start_index = _first_call_index(audio.calls, ("play_sound_event_start", str(SoundEvent.WAKE_NEW_CONVERSATION)))
+    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_NEW_CONVERSATION)))
     prompt_start_index = next(i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start")
     assert ack_start_index < ack_end_index < prompt_start_index
 
@@ -466,7 +529,7 @@ async def test_prompt_capture_waits_for_wake_ack_awaitable_to_complete(bundle_pa
     audio.allow_wake_ack_finish.set()
     await runtime.wait_until_idle()
 
-    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_ACK)))
+    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_NEW_CONVERSATION)))
     prompt_start_index = next(i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start")
     assert ack_end_index < prompt_start_index
 
@@ -484,7 +547,7 @@ async def test_wake_ack_playback_failure_is_logged_and_prompt_capture_still_star
     assert len(failure_events) == 1
     assert failure_events[0].success is False
     assert "wake ack playback failed" in failure_events[0].error
-    failure_index = _first_call_index(audio.calls, ("play_sound_event_failed", str(SoundEvent.WAKE_ACK)))
+    failure_index = _first_call_index(audio.calls, ("play_sound_event_failed", str(SoundEvent.WAKE_NEW_CONVERSATION)))
     prompt_start_index = next(i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start")
     assert failure_index < prompt_start_index
 
@@ -533,7 +596,7 @@ async def test_admin_simulated_wake_uses_acknowledgement_before_capture(bundle_p
     audio.allow_wake_ack_finish.set()
     await runtime.wait_until_idle()
 
-    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_ACK)))
+    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_NEW_CONVERSATION)))
     prompt_start_index = next(i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start")
     assert ack_end_index < prompt_start_index
     wake_events = telemetry.query_events(event_type=str(EventType.WAKE_DETECTED))

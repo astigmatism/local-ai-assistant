@@ -18,6 +18,7 @@ class RuntimeState(StrEnum):
 
 class SoundEvent(StrEnum):
     WAKE_ACK = "wake_ack"
+    WAKE_NEW_CONVERSATION = "wake_new_conversation"
     INVALID_PROMPT = "invalid_prompt"
     PROMPT_ACCEPTED = "prompt_accepted"
     THINKING = "thinking"

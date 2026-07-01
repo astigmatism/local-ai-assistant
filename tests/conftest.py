@@ -85,7 +85,7 @@ class FakeAudio:
         event_name = str(event)
         self.calls.append(("play_sound_event", event_name))
         self.calls.append(("play_sound_event_start", event_name))
-        if event_name == str(SoundEvent.WAKE_ACK):
+        if event_name in {str(SoundEvent.WAKE_ACK), str(SoundEvent.WAKE_NEW_CONVERSATION)}:
             self.wake_ack_started.set()
             if self.fail_wake_ack:
                 self.calls.append(("play_sound_event_failed", event_name))
@@ -250,7 +250,13 @@ def bundle_parts(tmp_path, monkeypatch):
     cfg["storage"]["telemetry_db_path"] = str(tmp_path / "telemetry.sqlite3")
     cfg["sounds"]["library_dir"] = str(tmp_path / "sounds")
     os.makedirs(cfg["sounds"]["library_dir"], exist_ok=True)
-    for name in {v for v in cfg["sounds"]["event_files"].values()}:
+    configured_sound_names = []
+    for value in cfg["sounds"]["event_files"].values():
+        if isinstance(value, list):
+            configured_sound_names.extend(value)
+        else:
+            configured_sound_names.append(value)
+    for name in {name for name in configured_sound_names if name}:
         write_wav(Path(cfg["sounds"]["library_dir"]) / name)
     store.apply_config(cfg)
     telemetry = TelemetryStore(cfg["storage"]["telemetry_db_path"], cfg["storage"]["artifacts_dir"])

@@ -77,6 +77,10 @@ class ConversationManager:
             self._last_response_finished_at = None
             return True
 
+    def has_active_context(self) -> bool:
+        with self._lock:
+            return len(self._messages) > 1 or self._last_response_finished_at is not None
+
     def messages_for_llm(self) -> list[dict[str, str]]:
         with self._lock:
             return [{"role": message.role, "content": message.content} for message in self._messages]

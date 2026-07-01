@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import math
+import random
 import shutil
 import signal
 import time
 import uuid
 import wave
 from array import array
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import AssistantConfig
+from .config import AssistantConfig, SoundEventFileValue
 from .constants import SoundEvent
 
 
@@ -57,13 +59,30 @@ def rms_int16_le(data: bytes) -> float:
     return math.sqrt(total / len(samples))
 
 
+def select_sound_event_file(
+    value: SoundEventFileValue,
+    choose: Callable[[Sequence[str]], str] | None = None,
+) -> str | None:
+    """Resolve a configured sound event value to one selected filename for this occurrence."""
+
+    if isinstance(value, str):
+        return value or None
+    if not value:
+        raise ValueError("sound event arrays must not be empty; use an empty string to disable playback")
+    selected = (choose or random.choice)(value)
+    if not isinstance(selected, str):  # pragma: no cover - defensive against invalid injected choosers
+        raise TypeError("sound event random selector must return a string")
+    return selected or None
+
+
 class AudioController:
     """Thin wrapper around ALSA utilities used by the Ubuntu speakerphone client."""
 
-    def __init__(self):
+    def __init__(self, *, sound_choice: Callable[[Sequence[str]], str] | None = None):
         self._effect_lock = asyncio.Lock()
         self._process_lock = asyncio.Lock()
         self._processes: set[asyncio.subprocess.Process] = set()
+        self._sound_choice = sound_choice or random.choice
 
     async def ensure_output_volume(self, cfg: AssistantConfig) -> None:
         if cfg.audio.enforce_pcm_volume_percent is None:
@@ -83,15 +102,38 @@ class AudioController:
         )
         await proc.communicate()
 
-    def resolve_sound_path(self, cfg: AssistantConfig, event: SoundEvent | str) -> Path | None:
+    def resolve_sound_filename(self, cfg: AssistantConfig, event: SoundEvent | str) -> str | None:
         event_key = SoundEvent(event)
-        filename = cfg.sounds.event_files[event_key]
-        if filename == "":
+        return select_sound_event_file(cfg.sounds.event_files[event_key], self._sound_choice)
+
+    def resolve_sound_path(self, cfg: AssistantConfig, event: SoundEvent | str) -> Path | None:
+        filename = self.resolve_sound_filename(cfg, event)
+        if filename is None:
             return None
         path = Path(filename)
         if not path.is_absolute():
             path = Path(cfg.sounds.library_dir) / path
         return path
+
+    async def _play_resolved_sound_path(
+        self,
+        cfg: AssistantConfig,
+        path: Path,
+        *,
+        cancel_event: asyncio.Event | None,
+        serialize: bool,
+        require_playback: bool,
+    ) -> None:
+        if serialize:
+            async with self._effect_lock:
+                if require_playback:
+                    await self.play_file(cfg, path, cancel_event=cancel_event, require_playback=True)
+                else:
+                    await self.play_file(cfg, path, cancel_event=cancel_event)
+        elif require_playback:
+            await self.play_file(cfg, path, cancel_event=cancel_event, require_playback=True)
+        else:
+            await self.play_file(cfg, path, cancel_event=cancel_event)
 
     async def play_sound_event(
         self,
@@ -105,16 +147,13 @@ class AudioController:
         path = self.resolve_sound_path(cfg, event)
         if path is None:
             return
-        if serialize:
-            async with self._effect_lock:
-                if require_playback:
-                    await self.play_file(cfg, path, cancel_event=cancel_event, require_playback=True)
-                else:
-                    await self.play_file(cfg, path, cancel_event=cancel_event)
-        elif require_playback:
-            await self.play_file(cfg, path, cancel_event=cancel_event, require_playback=True)
-        else:
-            await self.play_file(cfg, path, cancel_event=cancel_event)
+        await self._play_resolved_sound_path(
+            cfg,
+            path,
+            cancel_event=cancel_event,
+            serialize=serialize,
+            require_playback=require_playback,
+        )
 
     async def play_file(
         self,
@@ -166,19 +205,32 @@ class AudioController:
 
     def start_looping_sound(self, cfg: AssistantConfig, event: SoundEvent | str) -> LoopingSoundHandle:
         stop_event = asyncio.Event()
-        if self.resolve_sound_path(cfg, event) is None:
+        path = self.resolve_sound_path(cfg, event)
+        if path is None:
             task = asyncio.create_task(self._no_sound_loop())
         else:
-            task = asyncio.create_task(self._loop_sound(cfg, event, stop_event))
+            task = asyncio.create_task(self._loop_resolved_sound_path(cfg, path, stop_event))
         return LoopingSoundHandle(stop_event=stop_event, task=task)
 
     async def _no_sound_loop(self) -> None:
         return
 
     async def _loop_sound(self, cfg: AssistantConfig, event: SoundEvent | str, stop_event: asyncio.Event) -> None:
+        path = self.resolve_sound_path(cfg, event)
+        if path is None:
+            return
+        await self._loop_resolved_sound_path(cfg, path, stop_event)
+
+    async def _loop_resolved_sound_path(self, cfg: AssistantConfig, path: Path, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
             try:
-                await self.play_sound_event(cfg, event, cancel_event=stop_event, serialize=True)
+                await self._play_resolved_sound_path(
+                    cfg,
+                    path,
+                    cancel_event=stop_event,
+                    serialize=True,
+                    require_playback=False,
+                )
             except asyncio.CancelledError:
                 break
             # Avoid a busy loop when audio utilities are not installed or file is missing.
