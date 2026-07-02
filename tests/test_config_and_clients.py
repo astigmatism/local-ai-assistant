@@ -25,17 +25,6 @@ def test_default_configuration_matches_design_inventory(tmp_path):
     assert SoundEvent.WAKE_NEW_CONVERSATION.value == "wake_new_conversation"
     assert cfg.command_registry.recognizer.engine == "pocketsphinx"
     assert cfg.command_registry.recognizer.pocketsphinx_command == ["pocketsphinx_continuous"]
-    assert cfg.audio.sample_rate_hz == 16000
-    assert cfg.audio.channels == 1
-    assert cfg.audio.playback_sample_rate_hz == 48000
-    assert cfg.audio.playback_channels == 2
-    assert cfg.audio.playback_sample_format == "S16_LE"
-    assert cfg.audio.playback_pre_roll_milliseconds == 350
-    assert cfg.audio.playback_sound_event_start_stop_mitigation_enabled is False
-    assert cfg.audio.playback_fade_in_milliseconds == 100
-    assert cfg.audio.playback_fade_out_milliseconds == 150
-    assert cfg.audio.playback_silence_tail_milliseconds == 500
-    assert cfg.audio.enforce_pcm_volume_percent == 70
 
 
 
@@ -54,39 +43,6 @@ def test_legacy_configured_text_command_recognizer_is_migrated_to_local_audio_de
     assert store.get_saved().command_registry.recognizer.engine == "pocketsphinx"
     reloaded = ConfigStore(config_path)
     assert reloaded.get_saved().command_registry.recognizer.engine == "pocketsphinx"
-
-
-def test_legacy_audio_config_adds_playback_mitigation_defaults_without_changing_capture(tmp_path):
-    config_path = tmp_path / "config.json"
-    data = AssistantConfig().public_dict()
-    legacy_playback_keys = [
-        "playback_preparation_enabled",
-        "playback_sound_event_start_stop_mitigation_enabled",
-        "playback_sample_rate_hz",
-        "playback_channels",
-        "playback_sample_format",
-        "playback_pre_roll_milliseconds",
-        "playback_pre_roll_mode",
-        "playback_comfort_noise_amplitude",
-        "playback_fade_in_milliseconds",
-        "playback_fade_out_milliseconds",
-        "playback_silence_tail_milliseconds",
-        "playback_buffer_time_microseconds",
-        "playback_period_time_microseconds",
-    ]
-    for key in legacy_playback_keys:
-        data["audio"].pop(key)
-    data["audio"]["enforce_pcm_volume_percent"] = 100
-    ConfigStore._write_json(config_path, data)
-
-    cfg = ConfigStore(config_path).get_saved()
-
-    assert cfg.audio.sample_rate_hz == 16000
-    assert cfg.audio.channels == 1
-    assert cfg.audio.playback_sample_rate_hz == 48000
-    assert cfg.audio.playback_channels == 2
-    assert cfg.audio.playback_pre_roll_milliseconds == 350
-    assert cfg.audio.enforce_pcm_volume_percent == 70
 
 
 def test_command_thinking_sound_can_be_configured_independently():

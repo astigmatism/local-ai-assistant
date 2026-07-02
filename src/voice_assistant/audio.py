@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import math
 import random
 import shutil
 import signal
-import sys
 import time
 import uuid
 import wave
@@ -27,25 +25,6 @@ class CaptureResult:
     ended_by: str
     rms_peak: float
     bytes_written: int
-
-
-@dataclass(frozen=True)
-class PlaybackPreparationResult:
-    source_path: Path
-    playback_path: Path
-    temporary: bool
-    source_sample_rate_hz: int
-    source_channels: int
-    source_duration_seconds: float
-    sample_rate_hz: int
-    channels: int
-    sample_format: str
-    playback_duration_seconds: float
-    pre_roll_milliseconds: int
-    pre_roll_mode: str
-    fade_in_milliseconds: int
-    fade_out_milliseconds: int
-    silence_tail_milliseconds: int
 
 
 @dataclass
@@ -96,223 +75,6 @@ def select_sound_event_file(
     return selected or None
 
 
-INT16_MIN = -32768
-INT16_MAX = 32767
-
-
-def _clamp_int16(value: float | int) -> int:
-    return max(INT16_MIN, min(INT16_MAX, int(round(value))))
-
-
-def _duration_ms_to_frames(milliseconds: int, sample_rate_hz: int) -> int:
-    return max(0, int(round(sample_rate_hz * milliseconds / 1000)))
-
-
-def _decode_pcm_to_int16(data: bytes, sample_width: int) -> list[int]:
-    if sample_width == 1:
-        # 8-bit PCM WAV is unsigned; normalize it to signed 16-bit.
-        return [int(byte - 128) << 8 for byte in data]
-    if sample_width == 2:
-        samples = array("h")
-        samples.frombytes(data)
-        if sys.byteorder != "little":  # pragma: no cover - CI is little-endian, ALSA target is LE.
-            samples.byteswap()
-        return list(samples)
-    if sample_width == 3:
-        decoded: list[int] = []
-        for index in range(0, len(data), 3):
-            chunk = data[index : index + 3]
-            if len(chunk) < 3:  # pragma: no cover - wave frames should be complete.
-                break
-            sign = b"\xff" if chunk[2] & 0x80 else b"\x00"
-            decoded.append(int.from_bytes(chunk + sign, "little", signed=True) >> 8)
-        return decoded
-    if sample_width == 4:
-        decoded = []
-        for index in range(0, len(data), 4):
-            chunk = data[index : index + 4]
-            if len(chunk) < 4:  # pragma: no cover - wave frames should be complete.
-                break
-            decoded.append(int.from_bytes(chunk, "little", signed=True) >> 16)
-        return decoded
-    raise ValueError(f"unsupported WAV sample width: {sample_width} bytes")
-
-
-def _encode_int16_le(samples: Sequence[int]) -> bytes:
-    encoded = array("h", (_clamp_int16(sample) for sample in samples))
-    if sys.byteorder != "little":  # pragma: no cover - CI is little-endian, ALSA target is LE.
-        encoded.byteswap()
-    return encoded.tobytes()
-
-
-def _convert_channels(samples: Sequence[int], source_channels: int, target_channels: int) -> list[int]:
-    if source_channels <= 0 or target_channels <= 0:
-        raise ValueError("channel counts must be positive")
-    if source_channels == target_channels:
-        return list(samples)
-
-    frame_count = len(samples) // source_channels
-    converted: list[int] = []
-    for frame_index in range(frame_count):
-        start = frame_index * source_channels
-        frame = list(samples[start : start + source_channels])
-        if target_channels == 1:
-            converted.append(_clamp_int16(sum(frame) / len(frame)))
-        elif source_channels == 1:
-            converted.extend([frame[0]] * target_channels)
-        elif target_channels <= source_channels:
-            converted.extend(frame[:target_channels])
-        else:
-            converted.extend(frame)
-            converted.extend([frame[-1]] * (target_channels - source_channels))
-    return converted
-
-
-def _resample_interleaved(
-    samples: Sequence[int],
-    *,
-    source_sample_rate_hz: int,
-    target_sample_rate_hz: int,
-    channels: int,
-) -> list[int]:
-    if source_sample_rate_hz <= 0 or target_sample_rate_hz <= 0:
-        raise ValueError("sample rates must be positive")
-    if channels <= 0:
-        raise ValueError("channel count must be positive")
-    if source_sample_rate_hz == target_sample_rate_hz:
-        return list(samples)
-
-    source_frame_count = len(samples) // channels
-    if source_frame_count == 0:
-        return []
-    if source_frame_count == 1:
-        target_frame_count = max(1, int(round(target_sample_rate_hz / source_sample_rate_hz)))
-        return list(samples[:channels]) * target_frame_count
-
-    target_frame_count = max(1, int(round(source_frame_count * target_sample_rate_hz / source_sample_rate_hz)))
-    step = source_sample_rate_hz / target_sample_rate_hz
-    resampled: list[int] = []
-    for target_frame_index in range(target_frame_count):
-        source_position = target_frame_index * step
-        left_frame = int(source_position)
-        if left_frame >= source_frame_count - 1:
-            base = (source_frame_count - 1) * channels
-            resampled.extend(samples[base : base + channels])
-            continue
-        fraction = source_position - left_frame
-        left_base = left_frame * channels
-        right_base = (left_frame + 1) * channels
-        for channel_index in range(channels):
-            left = samples[left_base + channel_index]
-            right = samples[right_base + channel_index]
-            resampled.append(_clamp_int16(left + (right - left) * fraction))
-    return resampled
-
-
-def _preroll_samples(cfg: AssistantConfig, frame_count: int) -> list[int]:
-    total_samples = frame_count * cfg.audio.playback_channels
-    if total_samples <= 0:
-        return []
-    if cfg.audio.playback_pre_roll_mode == "comfort_noise" and cfg.audio.playback_comfort_noise_amplitude > 0:
-        amplitude = cfg.audio.playback_comfort_noise_amplitude
-        noise = random.Random()
-        return [noise.randint(-amplitude, amplitude) for _ in range(total_samples)]
-    return [0] * total_samples
-
-
-def _apply_playback_envelope_and_padding(
-    cfg: AssistantConfig,
-    speech_samples: Sequence[int],
-    *,
-    apply_start_stop_mitigation: bool,
-) -> list[int]:
-    channels = cfg.audio.playback_channels
-    sample_rate = cfg.audio.playback_sample_rate_hz
-    speech_frame_count = len(speech_samples) // channels
-    if not apply_start_stop_mitigation:
-        return list(speech_samples)
-
-    pre_roll_frames = _duration_ms_to_frames(cfg.audio.playback_pre_roll_milliseconds, sample_rate)
-    tail_frames = _duration_ms_to_frames(cfg.audio.playback_silence_tail_milliseconds, sample_rate)
-    fade_in_frames = min(_duration_ms_to_frames(cfg.audio.playback_fade_in_milliseconds, sample_rate), speech_frame_count)
-    fade_out_frames = min(_duration_ms_to_frames(cfg.audio.playback_fade_out_milliseconds, sample_rate), speech_frame_count)
-
-    mitigated = _preroll_samples(cfg, pre_roll_frames)
-    for frame_index in range(speech_frame_count):
-        scale = 1.0
-        if fade_in_frames > 0 and frame_index < fade_in_frames:
-            scale = min(scale, frame_index / fade_in_frames)
-        if fade_out_frames > 0 and frame_index >= speech_frame_count - fade_out_frames:
-            remaining = speech_frame_count - frame_index - 1
-            scale = min(scale, remaining / fade_out_frames)
-        source_offset = frame_index * channels
-        for channel_index in range(channels):
-            sample = speech_samples[source_offset + channel_index]
-            mitigated.append(_clamp_int16(sample * scale))
-    mitigated.extend([0] * tail_frames * channels)
-    return mitigated
-
-
-def prepare_wav_for_playback(
-    cfg: AssistantConfig,
-    source_path: str | Path,
-    output_path: str | Path,
-    *,
-    temporary: bool = False,
-    apply_start_stop_mitigation: bool = True,
-) -> PlaybackPreparationResult:
-    """Normalize a WAV file for ALSA speaker playback and add start/stop transient mitigation."""
-
-    source = Path(source_path)
-    output = Path(output_path)
-    with wave.open(str(source), "rb") as wav:
-        source_channels = wav.getnchannels()
-        source_sample_width = wav.getsampwidth()
-        source_sample_rate = wav.getframerate()
-        source_frame_count = wav.getnframes()
-        frames = wav.readframes(source_frame_count)
-
-    decoded = _decode_pcm_to_int16(frames, source_sample_width)
-    converted = _convert_channels(decoded, source_channels, cfg.audio.playback_channels)
-    resampled = _resample_interleaved(
-        converted,
-        source_sample_rate_hz=source_sample_rate,
-        target_sample_rate_hz=cfg.audio.playback_sample_rate_hz,
-        channels=cfg.audio.playback_channels,
-    )
-    mitigated = _apply_playback_envelope_and_padding(
-        cfg,
-        resampled,
-        apply_start_stop_mitigation=apply_start_stop_mitigation,
-    )
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(output), "wb") as wav:
-        wav.setnchannels(cfg.audio.playback_channels)
-        wav.setsampwidth(2)
-        wav.setframerate(cfg.audio.playback_sample_rate_hz)
-        wav.writeframes(_encode_int16_le(mitigated))
-
-    playback_frame_count = len(mitigated) // cfg.audio.playback_channels
-    return PlaybackPreparationResult(
-        source_path=source,
-        playback_path=output,
-        temporary=temporary,
-        source_sample_rate_hz=source_sample_rate,
-        source_channels=source_channels,
-        source_duration_seconds=source_frame_count / source_sample_rate if source_sample_rate else 0.0,
-        sample_rate_hz=cfg.audio.playback_sample_rate_hz,
-        channels=cfg.audio.playback_channels,
-        sample_format=cfg.audio.playback_sample_format,
-        playback_duration_seconds=playback_frame_count / cfg.audio.playback_sample_rate_hz,
-        pre_roll_milliseconds=cfg.audio.playback_pre_roll_milliseconds if apply_start_stop_mitigation else 0,
-        pre_roll_mode=cfg.audio.playback_pre_roll_mode if apply_start_stop_mitigation else "disabled",
-        fade_in_milliseconds=cfg.audio.playback_fade_in_milliseconds if apply_start_stop_mitigation else 0,
-        fade_out_milliseconds=cfg.audio.playback_fade_out_milliseconds if apply_start_stop_mitigation else 0,
-        silence_tail_milliseconds=cfg.audio.playback_silence_tail_milliseconds if apply_start_stop_mitigation else 0,
-    )
-
-
 class AudioController:
     """Thin wrapper around ALSA utilities used by the Ubuntu speakerphone client."""
 
@@ -361,40 +123,17 @@ class AudioController:
         cancel_event: asyncio.Event | None,
         serialize: bool,
         require_playback: bool,
-        apply_start_stop_mitigation: bool,
     ) -> None:
         if serialize:
             async with self._effect_lock:
                 if require_playback:
-                    await self.play_file(
-                        cfg,
-                        path,
-                        cancel_event=cancel_event,
-                        require_playback=True,
-                        apply_start_stop_mitigation=apply_start_stop_mitigation,
-                    )
+                    await self.play_file(cfg, path, cancel_event=cancel_event, require_playback=True)
                 else:
-                    await self.play_file(
-                        cfg,
-                        path,
-                        cancel_event=cancel_event,
-                        apply_start_stop_mitigation=apply_start_stop_mitigation,
-                    )
+                    await self.play_file(cfg, path, cancel_event=cancel_event)
         elif require_playback:
-            await self.play_file(
-                cfg,
-                path,
-                cancel_event=cancel_event,
-                require_playback=True,
-                apply_start_stop_mitigation=apply_start_stop_mitigation,
-            )
+            await self.play_file(cfg, path, cancel_event=cancel_event, require_playback=True)
         else:
-            await self.play_file(
-                cfg,
-                path,
-                cancel_event=cancel_event,
-                apply_start_stop_mitigation=apply_start_stop_mitigation,
-            )
+            await self.play_file(cfg, path, cancel_event=cancel_event)
 
     async def play_sound_event(
         self,
@@ -404,7 +143,6 @@ class AudioController:
         cancel_event: asyncio.Event | None = None,
         serialize: bool = True,
         require_playback: bool = False,
-        apply_start_stop_mitigation: bool | None = None,
     ) -> None:
         path = self.resolve_sound_path(cfg, event)
         if path is None:
@@ -415,66 +153,7 @@ class AudioController:
             cancel_event=cancel_event,
             serialize=serialize,
             require_playback=require_playback,
-            apply_start_stop_mitigation=(
-                cfg.audio.playback_sound_event_start_stop_mitigation_enabled
-                if apply_start_stop_mitigation is None
-                else apply_start_stop_mitigation
-            ),
         )
-
-    def new_playback_path(self, cfg: AssistantConfig, source_path: str | Path | None = None) -> Path:
-        source_stem = Path(source_path).stem if source_path else "audio"
-        return Path(cfg.storage.artifacts_dir) / "scratch" / f"playback-{source_stem}-{uuid.uuid4()}.wav"
-
-    def prepare_playback_file(
-        self,
-        cfg: AssistantConfig,
-        path: str | Path,
-        *,
-        output_path: str | Path | None = None,
-        temporary: bool = False,
-        apply_start_stop_mitigation: bool = True,
-    ) -> PlaybackPreparationResult:
-        source = Path(path)
-        if not cfg.audio.playback_preparation_enabled:
-            with wave.open(str(source), "rb") as wav:
-                source_frame_count = wav.getnframes()
-                source_rate = wav.getframerate()
-                source_channels = wav.getnchannels()
-            return PlaybackPreparationResult(
-                source_path=source,
-                playback_path=source,
-                temporary=False,
-                source_sample_rate_hz=source_rate,
-                source_channels=source_channels,
-                source_duration_seconds=source_frame_count / source_rate if source_rate else 0.0,
-                sample_rate_hz=source_rate,
-                channels=source_channels,
-                sample_format="source_wav",
-                playback_duration_seconds=source_frame_count / source_rate if source_rate else 0.0,
-                pre_roll_milliseconds=0,
-                pre_roll_mode="disabled",
-                fade_in_milliseconds=0,
-                fade_out_milliseconds=0,
-                silence_tail_milliseconds=0,
-            )
-        target = Path(output_path) if output_path is not None else self.new_playback_path(cfg, source)
-        return prepare_wav_for_playback(
-            cfg,
-            source,
-            target,
-            temporary=temporary,
-            apply_start_stop_mitigation=apply_start_stop_mitigation,
-        )
-
-    def _aplay_command(self, cfg: AssistantConfig, path: Path) -> list[str]:
-        command = ["aplay", "-q", "-D", cfg.audio.playback_device]
-        if cfg.audio.playback_buffer_time_microseconds is not None:
-            command.extend(["-B", str(cfg.audio.playback_buffer_time_microseconds)])
-        if cfg.audio.playback_period_time_microseconds is not None:
-            command.extend(["-F", str(cfg.audio.playback_period_time_microseconds)])
-        command.append(str(path))
-        return command
 
     async def play_file(
         self,
@@ -483,7 +162,6 @@ class AudioController:
         *,
         cancel_event: asyncio.Event | None = None,
         require_playback: bool = False,
-        apply_start_stop_mitigation: bool = True,
     ) -> None:
         path = Path(path)
         if not path.exists():
@@ -494,21 +172,13 @@ class AudioController:
             if require_playback:
                 raise RuntimeError("aplay is required for audio playback")
             return
-        prepared: PlaybackPreparationResult | None = None
-        playback_path = path
-        delete_playback_path = False
-        if cfg.audio.playback_preparation_enabled:
-            prepared = self.prepare_playback_file(
-                cfg,
-                path,
-                temporary=True,
-                apply_start_stop_mitigation=apply_start_stop_mitigation,
-            )
-            playback_path = prepared.playback_path
-            delete_playback_path = prepared.temporary
         await self.ensure_output_volume(cfg)
         proc = await asyncio.create_subprocess_exec(
-            *self._aplay_command(cfg, playback_path),
+            "aplay",
+            "-q",
+            "-D",
+            cfg.audio.playback_device,
+            str(path),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -532,9 +202,6 @@ class AudioController:
         finally:
             async with self._process_lock:
                 self._processes.discard(proc)
-            if delete_playback_path:
-                with contextlib.suppress(OSError):
-                    playback_path.unlink()
 
     def start_looping_sound(self, cfg: AssistantConfig, event: SoundEvent | str) -> LoopingSoundHandle:
         stop_event = asyncio.Event()
@@ -563,7 +230,6 @@ class AudioController:
                     cancel_event=stop_event,
                     serialize=True,
                     require_playback=False,
-                    apply_start_stop_mitigation=cfg.audio.playback_sound_event_start_stop_mitigation_enabled,
                 )
             except asyncio.CancelledError:
                 break

@@ -103,7 +103,7 @@ class FakeAudio:
         self.calls.append(("loop_requested", event_name))
         return FakeLoopHandle(self.calls, event_name)
 
-    async def play_file(self, cfg, path, *, cancel_event=None, require_playback=False, apply_start_stop_mitigation=True):
+    async def play_file(self, cfg, path, *, cancel_event=None, require_playback=False):
         self.calls.append(("play_file", str(path)))
         if require_playback:
             self.calls.append(("play_file_require_playback", str(path)))
