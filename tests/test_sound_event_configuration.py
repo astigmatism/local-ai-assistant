@@ -142,15 +142,18 @@ async def test_non_empty_sound_event_uses_existing_resolved_playback_path(monkey
     cfg = _config_with_event_file(tmp_path, SoundEvent.PROMPT_ACCEPTED, "prompt_accepted.wav")
     audio = AudioController()
     played_paths: list[Path] = []
+    playback_kwargs: list[dict[str, object]] = []
 
-    async def record_play_file(cfg_arg, path, *, cancel_event=None):
+    async def record_play_file(cfg_arg, path, *, cancel_event=None, **kwargs):
         played_paths.append(Path(path))
+        playback_kwargs.append(kwargs)
 
     monkeypatch.setattr(audio, "play_file", record_play_file)
 
     await audio.play_sound_event(cfg, SoundEvent.PROMPT_ACCEPTED)
 
     assert played_paths == [Path(cfg.sounds.library_dir) / "prompt_accepted.wav"]
+    assert playback_kwargs == [{"apply_start_stop_mitigation": False}]
 
 
 async def test_array_sound_event_selects_at_each_playback_request(monkeypatch, tmp_path):
@@ -159,7 +162,7 @@ async def test_array_sound_event_selects_at_each_playback_request(monkeypatch, t
     audio = AudioController(sound_choice=lambda options: options[next(selected_indices)])
     played_paths: list[Path] = []
 
-    async def record_play_file(cfg_arg, path, *, cancel_event=None):
+    async def record_play_file(cfg_arg, path, *, cancel_event=None, **kwargs):
         played_paths.append(Path(path))
 
     monkeypatch.setattr(audio, "play_file", record_play_file)
@@ -223,7 +226,7 @@ async def test_looping_sound_event_configured_as_array_selects_once_per_loop_ses
     audio = AudioController(sound_choice=choose)
     first_play_started = asyncio.Event()
 
-    async def record_play_file(cfg_arg, path, *, cancel_event=None):
+    async def record_play_file(cfg_arg, path, *, cancel_event=None, **kwargs):
         played_paths.append(Path(path))
         first_play_started.set()
         if cancel_event:

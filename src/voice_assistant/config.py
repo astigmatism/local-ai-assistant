@@ -334,9 +334,36 @@ class AudioDeviceConfig(BaseModel):
     capture_device: str = "plughw:0,0"
     playback_device: str = "plughw:0,0"
     mixer_card_index: int = Field(0, ge=0)
-    enforce_pcm_volume_percent: int = Field(100, ge=0, le=100)
-    sample_rate_hz: int = 16000
-    channels: int = 1
+    enforce_pcm_volume_percent: int | None = Field(70, ge=0, le=100)
+
+    # Capture remains tuned for the EMEET microphone and Whisper/STT. Playback is configured
+    # independently because the speaker endpoint is native 48 kHz stereo S16_LE.
+    sample_rate_hz: int = Field(16000, gt=0)
+    channels: int = Field(1, ge=1, le=8)
+
+    playback_preparation_enabled: bool = True
+    playback_sound_event_start_stop_mitigation_enabled: bool = False
+    playback_sample_rate_hz: int = Field(48000, gt=0)
+    playback_channels: int = Field(2, ge=1, le=8)
+    playback_sample_format: Literal["S16_LE"] = "S16_LE"
+    playback_pre_roll_milliseconds: int = Field(350, ge=0, le=750)
+    playback_pre_roll_mode: Literal["silence", "comfort_noise"] = "silence"
+    playback_comfort_noise_amplitude: int = Field(0, ge=0, le=512)
+    playback_fade_in_milliseconds: int = Field(100, ge=0, le=1000)
+    playback_fade_out_milliseconds: int = Field(150, ge=0, le=1000)
+    playback_silence_tail_milliseconds: int = Field(500, ge=0, le=5000)
+    playback_buffer_time_microseconds: int | None = Field(1000000, gt=0)
+    playback_period_time_microseconds: int | None = Field(250000, gt=0)
+
+    @model_validator(mode="after")
+    def validate_playback_timing(self) -> "AudioDeviceConfig":
+        if (
+            self.playback_buffer_time_microseconds is not None
+            and self.playback_period_time_microseconds is not None
+            and self.playback_period_time_microseconds > self.playback_buffer_time_microseconds
+        ):
+            raise ValueError("playback_period_time_microseconds must be <= playback_buffer_time_microseconds")
+        return self
 
 
 class StorageConfig(BaseModel):
@@ -460,6 +487,37 @@ def migrate_legacy_default_wake_phrase(config: AssistantConfig) -> AssistantConf
     return config
 
 
+def migrate_legacy_audio_playback_defaults(
+    config: AssistantConfig,
+    raw_data: dict[str, Any] | None = None,
+) -> AssistantConfig:
+    """Upgrade persisted pre-playback-mitigation audio defaults to safer speakerphone values."""
+
+    raw_audio = raw_data.get("audio") if isinstance(raw_data, dict) and isinstance(raw_data.get("audio"), dict) else {}
+    playback_keys = {
+        "playback_preparation_enabled",
+        "playback_sound_event_start_stop_mitigation_enabled",
+        "playback_sample_rate_hz",
+        "playback_channels",
+        "playback_sample_format",
+        "playback_pre_roll_milliseconds",
+        "playback_pre_roll_mode",
+        "playback_comfort_noise_amplitude",
+        "playback_fade_in_milliseconds",
+        "playback_fade_out_milliseconds",
+        "playback_silence_tail_milliseconds",
+        "playback_buffer_time_microseconds",
+        "playback_period_time_microseconds",
+    }
+    is_legacy_audio_config = not any(key in raw_audio for key in playback_keys)
+    if not is_legacy_audio_config or config.audio.enforce_pcm_volume_percent != 100:
+        return config
+
+    data = config.public_dict()
+    data["audio"]["enforce_pcm_volume_percent"] = 70
+    return AssistantConfig.model_validate(data)
+
+
 def migrate_legacy_configured_text_command_recognizer(
     config: AssistantConfig,
     raw_data: dict[str, Any] | None = None,
@@ -515,6 +573,7 @@ class ConfigStore:
             data = json.load(handle)
         self._loaded_saved_data = copy.deepcopy(data)
         loaded = migrate_legacy_default_wake_phrase(AssistantConfig.model_validate(data))
+        loaded = migrate_legacy_audio_playback_defaults(loaded, data)
         return migrate_legacy_configured_text_command_recognizer(loaded, data, include_saved_pocketsphinx_defaults=True)
 
     @staticmethod
@@ -567,6 +626,7 @@ class ConfigStore:
     def apply_config(self, new_config_data: dict[str, Any], remove_draft: bool = False) -> ConfigApplyResult:
         with self._lock:
             new_saved = migrate_legacy_default_wake_phrase(AssistantConfig.model_validate(new_config_data))
+            new_saved = migrate_legacy_audio_playback_defaults(new_saved, new_config_data)
             new_saved = migrate_legacy_configured_text_command_recognizer(new_saved, new_config_data)
             old_saved_dict = self.saved.public_dict()
             new_saved_dict = new_saved.public_dict()
@@ -636,5 +696,6 @@ __all__ = [
     "DEFAULT_PRODUCTION_WAKE_HEALTH_COMMAND",
     "production_wake_config",
     "migrate_legacy_default_wake_phrase",
+    "migrate_legacy_audio_playback_defaults",
     "migrate_legacy_configured_text_command_recognizer",
 ]
