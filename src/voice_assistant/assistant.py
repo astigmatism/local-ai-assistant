@@ -344,6 +344,50 @@ class AssistantRuntime:
             return SoundEvent.WAKE_ACK
         return SoundEvent.WAKE_NEW_CONVERSATION
 
+    def _new_conversation_wake_acknowledgement_event(self, cfg: AssistantConfig) -> SoundEvent:
+        # Current configs include wake_new_conversation and legacy configs are backfilled from wake_ack.
+        # Keep a defensive fallback so command re-entry can still listen if an injected config omits it.
+        if SoundEvent.WAKE_NEW_CONVERSATION in cfg.sounds.event_files:
+            return SoundEvent.WAKE_NEW_CONVERSATION
+        return SoundEvent.WAKE_ACK
+
+    async def _capture_with_wake_acknowledgement_started(
+        self,
+        cfg: AssistantConfig,
+        interaction_id: str,
+        conversation_id: str,
+        sound_event: SoundEvent,
+    ) -> None:
+        await self.wake_engine.pause("new_conversation_wake_ack")
+        acknowledgement_task = asyncio.create_task(
+            self._play_wake_acknowledgement(cfg, interaction_id, conversation_id, sound_event)
+        )
+        try:
+            # Let acknowledgement telemetry/audio get requested before prompt capture opens. Capture then
+            # runs while the short wake-style cue is playing, and command routing waits for it to finish
+            # so command_thinking cannot overlap the cue if a custom sound is long.
+            await asyncio.sleep(0)
+            await self._capture_gate_and_process(
+                cfg,
+                interaction_id,
+                conversation_id,
+                wake_detector_already_paused=True,
+                wait_before_command_routing=acknowledgement_task,
+                defer_wake_resume_until_after_wait=True,
+            )
+        except asyncio.CancelledError:
+            if not acknowledgement_task.done():
+                acknowledgement_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await acknowledgement_task
+            raise
+        except Exception:
+            if not acknowledgement_task.done():
+                acknowledgement_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await acknowledgement_task
+            raise
+
     def _refresh_conversation_config(self, cfg: AssistantConfig) -> None:
         self.conversation.inactivity_timeout_seconds = cfg.conversation.inactivity_timeout_seconds
         # Do not replace existing history when only the prompt text changes; a new conversation reset
@@ -357,6 +401,8 @@ class AssistantRuntime:
         conversation_id: str,
         *,
         wake_detector_already_paused: bool = False,
+        wait_before_command_routing: asyncio.Task[None] | None = None,
+        defer_wake_resume_until_after_wait: bool = False,
     ) -> None:
         cancel_event = self._active_cancel_event or asyncio.Event()
         prompt_path = self.audio.new_prompt_path(cfg, interaction_id)
@@ -374,38 +420,48 @@ class AssistantRuntime:
                 "silence_rms_threshold": cfg.prompt_capture.silence_rms_threshold,
             },
         )
+        resume_after_ack_wait = wait_before_command_routing is not None and defer_wake_resume_until_after_wait
+        capture_completed = False
         if not wake_detector_already_paused:
             await self.wake_engine.pause("prompt_capture")
         try:
             capture_task = asyncio.create_task(self.audio.record_prompt(cfg, prompt_path, cancel_event=cancel_event))
             capture = await capture_task
+            capture_completed = True
         finally:
-            await self.wake_engine.resume()
-        self.telemetry.log_event(
-            EventType.PROMPT_CAPTURE_ENDED,
-            "Prompt capture ended.",
-            state=RuntimeState.CAPTURING_PROMPT.value,
-            conversation_id=conversation_id,
-            interaction_id=interaction_id,
-            duration_ms=capture.duration_seconds * 1000,
-            data={"ended_by": capture.ended_by, "bytes_written": capture.bytes_written, "rms_peak": capture.rms_peak},
-        )
-        if cfg.telemetry.audio_artifact_storage_enabled:
-            artifact = self.telemetry.create_artifact(
-                capture.path,
-                ArtifactKind.PROMPT_AUDIO,
-                conversation_id=conversation_id,
-                interaction_id=interaction_id,
-                metadata={"ended_by": capture.ended_by},
-            )
+            if not resume_after_ack_wait or not capture_completed:
+                await self.wake_engine.resume()
+        try:
             self.telemetry.log_event(
                 EventType.PROMPT_CAPTURE_ENDED,
-                "Prompt audio artifact stored.",
+                "Prompt capture ended.",
                 state=RuntimeState.CAPTURING_PROMPT.value,
                 conversation_id=conversation_id,
                 interaction_id=interaction_id,
-                data={"artifact_id": artifact.id, "artifact_kind": artifact.kind},
+                duration_ms=capture.duration_seconds * 1000,
+                data={"ended_by": capture.ended_by, "bytes_written": capture.bytes_written, "rms_peak": capture.rms_peak},
             )
+            if cfg.telemetry.audio_artifact_storage_enabled:
+                artifact = self.telemetry.create_artifact(
+                    capture.path,
+                    ArtifactKind.PROMPT_AUDIO,
+                    conversation_id=conversation_id,
+                    interaction_id=interaction_id,
+                    metadata={"ended_by": capture.ended_by},
+                )
+                self.telemetry.log_event(
+                    EventType.PROMPT_CAPTURE_ENDED,
+                    "Prompt audio artifact stored.",
+                    state=RuntimeState.CAPTURING_PROMPT.value,
+                    conversation_id=conversation_id,
+                    interaction_id=interaction_id,
+                    data={"artifact_id": artifact.id, "artifact_kind": artifact.kind},
+                )
+            if wait_before_command_routing is not None:
+                await wait_before_command_routing
+        finally:
+            if resume_after_ack_wait and capture_completed:
+                await self.wake_engine.resume()
 
         self.state.set_state(RuntimeState.CHECKING_COMMAND, interaction_id=interaction_id, conversation_id=conversation_id)
         self.telemetry.log_event(
@@ -629,8 +685,8 @@ class AssistantRuntime:
             success=True,
             data={"alias": command.alias, "transcript": command.transcript, "routing_mode": "stt_first"},
         )
-        await self.audio.play_sound_event(cfg, sound_event, cancel_event=self._active_cancel_event)
         if command.intent == CommandIntent.CANCEL_STOP.value:
+            await self.audio.play_sound_event(cfg, sound_event, cancel_event=self._active_cancel_event)
             self.telemetry.log_event(
                 EventType.CANCELLATION,
                 "Cancel/stop command handled; returning to idle and preserving conversation context.",
@@ -641,21 +697,34 @@ class AssistantRuntime:
             self.state.set_state(RuntimeState.IDLE, interaction_id=interaction_id, conversation_id=conversation_id)
             return
         if command.intent == CommandIntent.NEW_CONVERSATION.value:
+            new_cfg = self.config_store.get_active()
+            self._refresh_conversation_config(new_cfg)
             new_conversation_id = self.conversation.reset()
+            new_interaction_id = str(uuid.uuid4())
+            wake_sound_event = self._new_conversation_wake_acknowledgement_event(new_cfg)
+            self.state.set_state(
+                RuntimeState.WAKE_DETECTED,
+                interaction_id=new_interaction_id,
+                conversation_id=new_conversation_id,
+            )
             self.telemetry.log_event(
                 EventType.NEW_CONVERSATION,
-                "New conversation command handled; local context discarded and prompt capture restarted without another wake word.",
+                "New conversation command handled; local context discarded and wake-style prompt capture restarted without another wake word.",
+                state=RuntimeState.WAKE_DETECTED.value,
                 conversation_id=new_conversation_id,
-                interaction_id=interaction_id,
+                interaction_id=new_interaction_id,
                 command_intent=command.intent,
+                data={
+                    "previous_conversation_id": conversation_id,
+                    "command_acknowledgement_sound_event_suppressed": sound_event.value,
+                    "wake_acknowledgement_sound_event": wake_sound_event.value,
+                },
             )
-            new_interaction_id = str(uuid.uuid4())
-            new_cfg = self.config_store.get_active()
-            await self._capture_gate_and_process(
+            await self._capture_with_wake_acknowledgement_started(
                 new_cfg,
                 new_interaction_id,
                 new_conversation_id,
-                wake_detector_already_paused=False,
+                wake_sound_event,
             )
             return
         raise RuntimeError(f"Unsupported command intent in v1 registry: {command.intent}")

@@ -56,6 +56,7 @@ class FakeAudio:
         self.playback_started = asyncio.Event()
         self.allow_playback_finish = asyncio.Event()
         self.block_wake_ack = False
+        self.block_wake_ack_events: list[str] = []
         self.fail_wake_ack = False
         self.wake_ack_started = asyncio.Event()
         self.allow_wake_ack_finish = asyncio.Event()
@@ -90,7 +91,8 @@ class FakeAudio:
             if self.fail_wake_ack:
                 self.calls.append(("play_sound_event_failed", event_name))
                 raise RuntimeError("wake ack playback failed")
-            if self.block_wake_ack:
+            should_block = self.block_wake_ack or event_name in self.block_wake_ack_events
+            if should_block:
                 while not self.allow_wake_ack_finish.is_set():
                     if cancel_event and cancel_event.is_set():
                         self.calls.append(("play_sound_event_cancelled", event_name))

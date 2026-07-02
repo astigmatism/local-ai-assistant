@@ -191,13 +191,92 @@ async def test_new_conversation_command_clears_context_and_immediately_captures_
     await runtime.on_wake_detected(detection())
     await runtime.wait_until_idle()
 
-    assert runtime.conversation.conversation_id != old_id
+    new_id = runtime.conversation.conversation_id
+    assert new_id != old_id
     assert stt.calls and tts.inputs == ["Fresh answer."]
     record_count = len([call for call in audio.calls if call[0] == "record_prompt_start"])
-    wake_count = len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_ACK))])
+    continuing_wake_count = len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_ACK))])
+    new_conversation_wake_count = len([call for call in audio.calls if call == ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION))])
+
     assert record_count == 2
-    assert wake_count == 1
-    assert any(call == ("play_sound_event", str(SoundEvent.NEW_CONVERSATION_ACCEPTED)) for call in audio.calls)
+    assert continuing_wake_count == 1
+    assert new_conversation_wake_count == 1
+    assert ("play_sound_event", str(SoundEvent.NEW_CONVERSATION_ACCEPTED)) not in audio.calls
+    assert len(llm.messages) == 1
+    assert llm.messages[0] == [
+        {"role": "system", "content": store.get_active().conversation.system_prompt},
+        {"role": "user", "content": "fresh prompt"},
+    ]
+    assert "old context" not in str(llm.messages[0])
+    assert "new conversation" not in str(llm.messages[0])
+
+    reset_events = telemetry.query_events(event_type=str(EventType.NEW_CONVERSATION))
+    assert reset_events[0].conversation_id == new_id
+    assert reset_events[0].data["previous_conversation_id"] == old_id
+    assert reset_events[0].data["wake_acknowledgement_sound_event"] == SoundEvent.WAKE_NEW_CONVERSATION.value
+    assert reset_events[0].data["command_acknowledgement_sound_event_suppressed"] == SoundEvent.NEW_CONVERSATION_ACCEPTED.value
+
+
+@pytest.mark.asyncio
+async def test_new_conversation_wake_acknowledgement_and_capture_overlap_but_command_routing_waits(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    runtime.conversation.add_user("old context")
+    audio.command_texts = ["start over", "stop"]
+    audio.block_wake_ack_events = [str(SoundEvent.WAKE_NEW_CONVERSATION)]
+
+    await runtime.on_wake_detected(detection())
+    await _wait_until(lambda: len([call for call in audio.calls if call[0] == "record_prompt_start"]) >= 2)
+
+    ack_start_index = _first_call_index(audio.calls, ("play_sound_event_start", str(SoundEvent.WAKE_NEW_CONVERSATION)))
+    prompt_starts = [i for i, call in enumerate(audio.calls) if call[0] == "record_prompt_start"]
+    second_prompt_start = prompt_starts[1]
+    command_thinking_starts = _call_indices(audio.calls, ("loop_requested", str(SoundEvent.COMMAND_THINKING)))
+
+    assert ack_start_index < second_prompt_start
+    assert ("play_sound_event_end", str(SoundEvent.WAKE_NEW_CONVERSATION)) not in audio.calls
+    assert len(command_thinking_starts) == 1
+    assert ("play_sound_event", str(SoundEvent.NEW_CONVERSATION_ACCEPTED)) not in audio.calls
+
+    audio.allow_wake_ack_finish.set()
+    await runtime.wait_until_idle()
+
+    ack_end_index = _first_call_index(audio.calls, ("play_sound_event_end", str(SoundEvent.WAKE_NEW_CONVERSATION)))
+    command_thinking_starts = _call_indices(audio.calls, ("loop_requested", str(SoundEvent.COMMAND_THINKING)))
+    assert second_prompt_start < ack_end_index < command_thinking_starts[1]
+    assert llm.messages == []
+    assert tts.inputs == []
+
+
+@pytest.mark.asyncio
+async def test_empty_new_conversation_wake_acknowledgement_still_captures_next_prompt(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    cfg = store.get_saved().public_dict()
+    cfg["sounds"]["event_files"][SoundEvent.WAKE_NEW_CONVERSATION.value] = ""
+    store.apply_config(cfg)
+    runtime.conversation.add_user("old context")
+    audio.command_texts = ["new chat", None]
+    stt.outputs = ["fresh prompt"]
+    llm.outputs = ["Fresh answer."]
+
+    await runtime.on_wake_detected(detection())
+    await runtime.wait_until_idle()
+
+    assert len([call for call in audio.calls if call[0] == "record_prompt_start"]) == 2
+    assert ("play_sound_event", str(SoundEvent.WAKE_NEW_CONVERSATION)) in audio.calls
+    assert ("play_sound_event", str(SoundEvent.NEW_CONVERSATION_ACCEPTED)) not in audio.calls
+    assert llm.messages[0] == [
+        {"role": "system", "content": store.get_active().conversation.system_prompt},
+        {"role": "user", "content": "fresh prompt"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_new_conversation_wake_acknowledgement_event_falls_back_to_wake_ack_when_missing(bundle_parts):
+    store, telemetry, runtime, audio, stt, llm, tts = bundle_parts
+    cfg = store.get_active()
+    cfg.sounds.event_files.pop(SoundEvent.WAKE_NEW_CONVERSATION)
+
+    assert runtime._new_conversation_wake_acknowledgement_event(cfg) == SoundEvent.WAKE_ACK
 
 
 @pytest.mark.asyncio
@@ -306,6 +385,14 @@ async def test_stt_first_command_routing_runs_only_after_wake_and_prompt_capture
     stt_start_index = _first_call_named(audio.calls, "stt_start")
     assert prompt_start_index < prompt_end_index < stt_start_index
     assert stt.calls
+
+
+async def _wait_until(predicate, timeout=3.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition was not satisfied before timeout")
+        await asyncio.sleep(0.01)
 
 
 def _first_call_index(calls, expected):
